@@ -75,6 +75,41 @@ function dur(sec) {
   return h ? h + '时' + String(m).padStart(2, '0') + '分' : m ? m + '分' + String(s).padStart(2, '0') + '秒' : s + '秒';
 }
 
+function formatTokenCount(tokens) {
+  if (tokens == null || tokens === '') return '—';
+  const n = Number(tokens);
+  if (!Number.isFinite(n) || n < 0) return '—';
+  if (n < 1000) return String(Math.round(n));
+  const units = [['k', 1e3], ['m', 1e6], ['b', 1e9]];
+  let unit = units[0];
+  for (const candidate of units) {
+    if (n >= candidate[1]) unit = candidate;
+  }
+  let value = n / unit[1];
+  let rounded = Number(value.toFixed(1));
+  // 999999 → 1m，而不是 1000k；四舍五入后自动升级单位。
+  const next = units[units.indexOf(unit) + 1];
+  if (next && rounded >= 1000) {
+    unit = next;
+    value = n / unit[1];
+    rounded = Number(value.toFixed(1));
+  }
+  return rounded + unit[0];
+}
+
+function formatLatency(ms) {
+  if (ms == null || ms === '') return '—';
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  return n < 1000 ? Math.round(n) + 'ms' : (n / 1000).toFixed(1).replace(/\.0$/, '') + 's';
+}
+function formatRate(rate) {
+  if (rate == null || rate === '') return '—';
+  const n = Number(rate);
+  if (!Number.isFinite(n) || n < 0) return '—';
+  return n.toFixed(1) + 'tok/s';
+}
+
 /* ── 密钥门 ───────────────────────────────────────────────────────── */
 function openKey() { $('keyVeil').classList.add('on'); setTimeout(() => $('keyInput').focus(), 60); }
 $('btnKey').onclick = async () => {
@@ -109,7 +144,7 @@ go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accou
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="8"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
@@ -132,6 +167,13 @@ function renderAccounts(list) {
       : Math.round((s.credits || 0) / maxCred * 100);
     const credTip = s.credits_total > 0 ? '剩余 ' + s.credits + ' / 总额 ' + s.credits_total + '（' + pct + '%）' : '积分（相对池内最高）';
     const frozen = s.disabled || cool > 0;
+    const tu = s.token_usage || {};
+    const req = tu.request_count || 0;
+    const totalTok = formatTokenCount(tu.total_tokens);
+    const totalTokUnit = totalTok === '—' ? '' : '<em>tok</em>';
+    const latency = formatLatency(tu.last_latency_ms);
+    const rate = formatRate(tu.last_tokens_per_second);
+    const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + '</div><div class="id">' + esc(short) + '</div></td>' +
@@ -139,6 +181,12 @@ function renderAccounts(list) {
       '<td class="cred" title="' + credTip + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +
+      '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
+        '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
+        '<span class="usage-item usage-total"><b>' + totalTok + '</b>' + totalTokUnit + '</span>' +
+        '<span class="usage-item usage-latency"><b>' + latency + '</b></span>' +
+        '<span class="usage-item usage-rate"><b>' + rate + '</b></span>' +
+      '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
       '<td class="acts">' +
         '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '">签到</button>' +

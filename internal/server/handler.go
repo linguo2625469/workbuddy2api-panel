@@ -361,6 +361,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			unbindSticky()
 		}
 	}
+	recordAttempt := func(uid string, delta pool.TokenUsageDelta, started time.Time) {
+		delta.Model = peek.Model
+		latency := time.Since(started)
+		latencyMs := latency.Milliseconds()
+		if latencyMs < 1 {
+			latencyMs = 1
+		}
+		delta.HasLatencyMs = true
+		delta.LatencyMs = latencyMs
+		if delta.HasCompletionTokens && delta.CompletionTokens >= 0 && latencyMs > 0 {
+			delta.HasTokensPerSecond = true
+			delta.TokensPerSecond = float64(delta.CompletionTokens) * 1000 / float64(latencyMs)
+		}
+		h.cfg.Pool.RecordTokenUsage(uid, delta)
+	}
 
 	// 系统提示词改写（出站前、轮转前；每个请求一次）。
 	//   - custom：用自有提示词替换客户端 system/developer（从源头消灭 system 指纹误报）。
@@ -427,16 +442,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
+		attemptStarted := time.Now()
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStream(acct, body, clientIP)
 		if terr != nil {
 			// 网络层抖动：只换号，不喂熔断计数（传输层错误对连续失败连坐熔断过于严苛）。
 			// 上游 client 已打 transport error 日志。
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, attemptStarted)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
 			fail(acct.UID)
 			continue
 		}
 		if status >= 400 {
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, attemptStarted)
 			st.status = status
 			kind := upstream.Classify(status, string(respBody))
 			// 内容拦截误报（passthrough 模式首遇）：判定为 system 指纹误报，
@@ -468,6 +486,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
 			_ = upstream.Stream(w, stats)
+			recordAttempt(acct.UID, stats.Usage(), attemptStarted)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
 			rc.Close()
@@ -476,11 +495,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		resp, err := upstream.Aggregate(rc)
 		rc.Close()
 		if err != nil {
+			recordAttempt(acct.UID, pool.TokenUsageDelta{}, attemptStarted)
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
 			return
 		}
+		recordAttempt(acct.UID, usageDeltaFromResponse(resp), attemptStarted)
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp)

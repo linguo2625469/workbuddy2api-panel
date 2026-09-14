@@ -148,6 +148,50 @@ func (p *Pool) NoteSuccess(uid string) {
 	}
 }
 
+// RecordTokenUsage 记录一次实际发起的聊天账号尝试及上游返回的 usage 增量。
+// usage 字段缺失时仍累计请求次数，但只累计明确存在的 token 字段。
+func (p *Pool) RecordTokenUsage(uid string, delta TokenUsageDelta) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	usage := &e.tokenUsage
+	usage.RequestCount++
+	usage.LastUsedAt = time.Now()
+	if delta.Model != "" {
+		usage.LastModel = delta.Model
+	}
+	known := false
+	if delta.HasPromptTokens && delta.PromptTokens >= 0 {
+		usage.PromptTokens += delta.PromptTokens
+		known = true
+	}
+	if delta.HasCompletionTokens && delta.CompletionTokens >= 0 {
+		usage.CompletionTokens += delta.CompletionTokens
+		known = true
+	}
+	if delta.HasTotalTokens && delta.TotalTokens >= 0 {
+		usage.TotalTokens += delta.TotalTokens
+		known = true
+	}
+	if known {
+		usage.UsageCount++
+	}
+	if delta.HasLatencyMs && delta.LatencyMs >= 0 {
+		usage.LastLatencyMs = delta.LatencyMs
+	}
+	if delta.HasTokensPerSecond && delta.TokensPerSecond >= 0 {
+		speed := delta.TokensPerSecond
+		usage.LastTokensPerSecond = &speed
+	} else {
+		// 失败或缺少 completion_tokens 时不展示上一次请求的旧吞吐速度。
+		usage.LastTokensPerSecond = nil
+	}
+	p.dirty.Store(true)
+}
+
 // Status 查询单账号状态。
 func (p *Pool) Status(uid string) (Status, bool) {
 	p.mu.RLock()
@@ -327,6 +371,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Disabled:        e.disabled,
 		SuccessCount:    e.successCount,
 		ErrTotal:        e.errTotal,
+		TokenUsage:      e.tokenUsage,
 		LastSuccessTime: e.lastSuccess,
 		LastErrTime:     e.lastErr,
 		Until:           e.until,

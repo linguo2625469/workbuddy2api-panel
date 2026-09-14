@@ -25,24 +25,54 @@ func (k CoolKind) String() string {
 	return "unknown"
 }
 
+// TokenUsage 账号聊天请求的累计 token 用量摘要（不包含任何原始凭证）。
+type TokenUsage struct {
+	RequestCount        int64     `json:"request_count,omitempty"`
+	UsageCount          int64     `json:"usage_count,omitempty"`
+	PromptTokens        int64     `json:"prompt_tokens,omitempty"`
+	CompletionTokens    int64     `json:"completion_tokens,omitempty"`
+	TotalTokens         int64     `json:"total_tokens,omitempty"`
+	LastLatencyMs       int64     `json:"last_latency_ms,omitempty"`
+	LastTokensPerSecond *float64  `json:"last_tokens_per_second,omitempty"`
+	LastUsedAt          time.Time `json:"last_used_at,omitempty"`
+	LastModel           string    `json:"last_model,omitempty"`
+}
+
+// TokenUsageDelta 是一次聊天账号尝试的 usage 增量。
+// 各 Has* 字段用于区分上游缺少字段与字段值确实为 0。
+type TokenUsageDelta struct {
+	Model               string
+	HasPromptTokens     bool
+	PromptTokens        int64
+	HasCompletionTokens bool
+	CompletionTokens    int64
+	HasTotalTokens      bool
+	TotalTokens         int64
+	HasLatencyMs        bool
+	LatencyMs           int64
+	HasTokensPerSecond  bool
+	TokensPerSecond     float64
+}
+
 // Status 单个账号对外暴露的状态（脱敏）。
 type Status struct {
-	UID             string    `json:"uid"`
-	Nickname        string    `json:"nickname,omitempty"`
-	Credits         int64     `json:"credits"`
-	CreditsTotal    int64     `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
-	Cooling         bool      `json:"cooling"`
-	CoolKind        string    `json:"cool_kind,omitempty"`
-	CoolRemaining   int64     `json:"cool_remaining_sec,omitempty"`
-	Until           time.Time `json:"until,omitempty"`
-	Reason          string    `json:"reason,omitempty"`
-	SoftStreak      int       `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
-	Disabled        bool      `json:"disabled"`
-	DisabledReason  string    `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
-	SuccessCount    int64     `json:"success_count,omitempty"`
-	ErrTotal        int64     `json:"err_total,omitempty"`
-	LastSuccessTime time.Time `json:"last_success,omitempty"`
-	LastErrTime     time.Time `json:"last_err,omitempty"`
+	UID             string     `json:"uid"`
+	Nickname        string     `json:"nickname,omitempty"`
+	Credits         int64      `json:"credits"`
+	CreditsTotal    int64      `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
+	Cooling         bool       `json:"cooling"`
+	CoolKind        string     `json:"cool_kind,omitempty"`
+	CoolRemaining   int64      `json:"cool_remaining_sec,omitempty"`
+	Until           time.Time  `json:"until,omitempty"`
+	Reason          string     `json:"reason,omitempty"`
+	SoftStreak      int        `json:"soft_streak,omitempty"` // 连续软冷却次数（指数退避指数，见 entry.softStreak）
+	Disabled        bool       `json:"disabled"`
+	DisabledReason  string     `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	SuccessCount    int64      `json:"success_count,omitempty"`
+	ErrTotal        int64      `json:"err_total,omitempty"`
+	LastSuccessTime time.Time  `json:"last_success,omitempty"`
+	LastErrTime     time.Time  `json:"last_err,omitempty"`
+	TokenUsage      TokenUsage `json:"token_usage,omitempty"`
 	// 运行态（不持久化）：在途请求数 + 熔断器状态。
 	InFlight     int       `json:"in_flight"`
 	BreakerFails int       `json:"breaker_fails"`
@@ -51,11 +81,12 @@ type Status struct {
 type entry struct {
 	a            *auth.Auth
 	credits      int64
-	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
-	successCount int64     // 累计成功
-	errTotal     int64     // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
-	lastErr      time.Time // 最近一次错误时间
-	lastSuccess  time.Time // 最近一次成功时间
+	creditsTotal int64      // 积分总额度（UserResource 聚合；0 = 未知）
+	successCount int64      // 累计成功
+	errTotal     int64      // 累计错误（供成功率权重 successRate = successCount/(successCount+errTotal)，不清零）
+	lastErr      time.Time  // 最近一次错误时间
+	lastSuccess  time.Time  // 最近一次成功时间
+	tokenUsage   TokenUsage // 聊天请求 token 用量摘要（持久化）
 	coolKind     CoolKind
 	until        time.Time // 冷却截止（即时冷却：CoolSoft 429 / CoolHard 余额耗尽）
 	disabled     bool
@@ -158,10 +189,11 @@ type stateAccount struct {
 	SuccessCount int64     `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
-	ErrTotal    int64     `json:"err_total,omitempty"`
-	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
-	LastSuccess time.Time `json:"last_success,omitempty"`
-	LastErr     time.Time `json:"last_err,omitempty"`
+	ErrTotal    int64      `json:"err_total,omitempty"`
+	ErrCount    int        `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
+	LastSuccess time.Time  `json:"last_success,omitempty"`
+	LastErr     time.Time  `json:"last_err,omitempty"`
+	TokenUsage  TokenUsage `json:"token_usage,omitempty"`
 	// SoftStreak 连续软冷却次数（软退避指数）。旧 state.json 缺此字段 → 零值，
 	// 退避从基数重新开始（向后兼容）。
 	SoftStreak int `json:"soft_streak,omitempty"`

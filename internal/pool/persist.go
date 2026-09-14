@@ -124,6 +124,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			errTotal:     errTotal,
 			lastErr:      s.LastErr,
 			lastSuccess:  s.LastSuccess,
+			tokenUsage:   s.TokenUsage,
 			softStreak:   s.SoftStreak,
 		}
 	}
@@ -199,6 +200,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			ErrTotal:     e.errTotal,
 			LastSuccess:  e.lastSuccess,
 			LastErr:      e.lastErr,
+			TokenUsage:   e.tokenUsage,
 			SoftStreak:   e.softStreak,
 		}
 	}

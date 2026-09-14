@@ -52,6 +52,10 @@ func TestChatStatsReaderTokensFromUsage(t *testing.T) {
 	if !ok || toks != 1 {
 		t.Fatalf("tokens=%d ok=%v, want 1/true (from usage, not rune count)", toks, ok)
 	}
+	usage := r.Usage()
+	if !usage.HasPromptTokens || usage.PromptTokens != 1 || !usage.HasCompletionTokens || usage.CompletionTokens != 1 || !usage.HasTotalTokens || usage.TotalTokens != 2 {
+		t.Fatalf("usage=%+v, want prompt=1 completion=1 total=2", usage)
+	}
 	if r.TTFB() <= 0 {
 		t.Errorf("ttfb=%v want >0", r.TTFB())
 	}

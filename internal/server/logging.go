@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 )
 
 // chatSeq 进程级请求序号。
@@ -62,13 +64,17 @@ func (s *chatStat) done() {
 // 并记录首个 data 帧的 TTFB；原始字节原样返回给下游透传。
 // 注意：不做 rune 估算，token 数一律采信上游 usage。
 type chatStatsReader struct {
-	br       *bufio.Reader
-	start    time.Time
-	ttfb     time.Duration
-	seen     bool // 已见过首个 data 帧（TTFB 只记一次）
-	hasUsage bool // 末帧是否带 usage
-	tokens   int
-	pend     []byte // 已读未返回的行缓存
+	br                  *bufio.Reader
+	start               time.Time
+	ttfb                time.Duration
+	seen                bool // 已见过首个 data 帧（TTFB 只记一次）
+	promptTokens        int
+	completionTokens    int
+	totalTokens         int
+	hasPromptTokens     bool
+	hasCompletionTokens bool
+	hasTotalTokens      bool
+	pend                []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -80,7 +86,19 @@ func newChatStatsReaderSince(r io.Reader, since time.Time) *chatStatsReader {
 func (s *chatStatsReader) TTFB() time.Duration { return s.ttfb }
 
 // Tokens 返回末帧 usage.completion_tokens 与是否缺失；无 usage 时 ok=false。
-func (s *chatStatsReader) Tokens() (int, bool) { return s.tokens, s.hasUsage }
+func (s *chatStatsReader) Tokens() (int, bool) { return s.completionTokens, s.hasCompletionTokens }
+
+// Usage 返回流式响应中已收到的 token usage 字段。
+func (s *chatStatsReader) Usage() pool.TokenUsageDelta {
+	return pool.TokenUsageDelta{
+		HasPromptTokens:     s.hasPromptTokens,
+		PromptTokens:        int64(s.promptTokens),
+		HasCompletionTokens: s.hasCompletionTokens,
+		CompletionTokens:    int64(s.completionTokens),
+		HasTotalTokens:      s.hasTotalTokens,
+		TotalTokens:         int64(s.totalTokens),
+	}
+}
 
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
 func (s *chatStatsReader) parseSSELine(line string) {
@@ -98,14 +116,26 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	}
 	var chunk struct {
 		Usage *struct {
-			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens     *int `json:"prompt_tokens"`
+			CompletionTokens *int `json:"completion_tokens"`
+			TotalTokens      *int `json:"total_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
 		return
 	}
-	s.hasUsage = true
-	s.tokens = chunk.Usage.CompletionTokens
+	if chunk.Usage.PromptTokens != nil {
+		s.hasPromptTokens = true
+		s.promptTokens = *chunk.Usage.PromptTokens
+	}
+	if chunk.Usage.CompletionTokens != nil {
+		s.hasCompletionTokens = true
+		s.completionTokens = *chunk.Usage.CompletionTokens
+	}
+	if chunk.Usage.TotalTokens != nil {
+		s.hasTotalTokens = true
+		s.totalTokens = *chunk.Usage.TotalTokens
+	}
 }
 
 // Read 返回原始数据，同时解析统计 TTFB/token。
@@ -135,6 +165,46 @@ func parseModelFromBody(body []byte) string {
 		return "-"
 	}
 	return obj.Model
+}
+
+// usageDeltaFromResponse 从非流式聚合响应中提取明确存在的 token 字段。
+func usageDeltaFromResponse(resp map[string]any) pool.TokenUsageDelta {
+	delta := pool.TokenUsageDelta{}
+	u, ok := resp["usage"].(map[string]any)
+	if !ok {
+		return delta
+	}
+	read := func(key string) (int64, bool) {
+		v, ok := u[key]
+		if !ok {
+			return 0, false
+		}
+		switch n := v.(type) {
+		case float64:
+			return int64(n), true
+		case float32:
+			return int64(n), true
+		case int:
+			return int64(n), true
+		case int64:
+			return n, true
+		case json.Number:
+			i, err := n.Int64()
+			return i, err == nil
+		default:
+			return 0, false
+		}
+	}
+	if n, ok := read("prompt_tokens"); ok {
+		delta.HasPromptTokens, delta.PromptTokens = true, n
+	}
+	if n, ok := read("completion_tokens"); ok {
+		delta.HasCompletionTokens, delta.CompletionTokens = true, n
+	}
+	if n, ok := read("total_tokens"); ok {
+		delta.HasTotalTokens, delta.TotalTokens = true, n
+	}
+	return delta
 }
 
 // completionTokens 从 Aggregate 返回的响应中提取 usage.completion_tokens；缺失返回 -1。

@@ -1657,3 +1657,82 @@ func TestStatusExposesRuntimeFields(t *testing.T) {
 	}
 	p.Release("u1")
 }
+
+func TestRecordTokenUsage(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	before := time.Now()
+	p.RecordTokenUsage("u1", TokenUsageDelta{
+		Model:               "glm-5.2",
+		HasPromptTokens:     true,
+		PromptTokens:        5,
+		HasCompletionTokens: true,
+		CompletionTokens:    7,
+		HasTotalTokens:      true,
+		TotalTokens:         12,
+		HasLatencyMs:        true,
+		LatencyMs:           1250,
+		HasTokensPerSecond:  true,
+		TokensPerSecond:     9.6,
+	})
+	p.RecordTokenUsage("u1", TokenUsageDelta{Model: "glm-5.2", HasLatencyMs: true, LatencyMs: 300})
+	st, _ := p.Status("u1")
+	if st.TokenUsage.RequestCount != 2 {
+		t.Errorf("request_count=%d want 2", st.TokenUsage.RequestCount)
+	}
+	if st.TokenUsage.UsageCount != 1 {
+		t.Errorf("usage_count=%d want 1", st.TokenUsage.UsageCount)
+	}
+	if st.TokenUsage.PromptTokens != 5 || st.TokenUsage.CompletionTokens != 7 || st.TokenUsage.TotalTokens != 12 {
+		t.Errorf("token usage=%+v", st.TokenUsage)
+	}
+	if st.TokenUsage.LastLatencyMs != 300 || st.TokenUsage.LastTokensPerSecond != nil {
+		t.Errorf("latest performance should replace speed with unknown: %+v", st.TokenUsage)
+	}
+	if st.TokenUsage.LastModel != "glm-5.2" || st.TokenUsage.LastUsedAt.Before(before) {
+		t.Errorf("last usage=%+v", st.TokenUsage)
+	}
+}
+
+func TestTokenUsagePersistsAcrossReload(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	p.RecordTokenUsage("u1", TokenUsageDelta{
+		Model:               "deepseek-v4",
+		HasPromptTokens:     true,
+		PromptTokens:        11,
+		HasCompletionTokens: true,
+		CompletionTokens:    13,
+		HasTotalTokens:      true,
+		TotalTokens:         24,
+		HasLatencyMs:        true,
+		LatencyMs:           2300,
+		HasTokensPerSecond:  true,
+		TokensPerSecond:     5.65,
+	})
+	p.Flush()
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st, ok := p2.Status("u1")
+	if !ok {
+		t.Fatal("account missing after reload")
+	}
+	if st.TokenUsage.RequestCount != 1 || st.TokenUsage.TotalTokens != 24 || st.TokenUsage.LastModel != "deepseek-v4" {
+		t.Errorf("token usage lost after reload: %+v", st.TokenUsage)
+	}
+	if st.TokenUsage.LastLatencyMs != 2300 || st.TokenUsage.LastTokensPerSecond == nil || *st.TokenUsage.LastTokensPerSecond != 5.65 {
+		t.Errorf("latest performance lost after reload: %+v", st.TokenUsage)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"token_usage"`) {
+		t.Fatalf("state.json missing token_usage: %s", raw)
+	}
+	if strings.Contains(string(raw), "AccessToken") || strings.Contains(string(raw), "RefreshToken") {
+		t.Fatalf("state.json contains credential field: %s", raw)
+	}
+}

@@ -168,6 +168,9 @@ func TestChatOversizedBodyReturns413(t *testing.T) {
 	if st.Cooling || st.Disabled || st.ErrTotal != 0 {
 		t.Errorf("413 must not penalize account: %+v", st)
 	}
+	if st.TokenUsage.RequestCount != 0 {
+		t.Errorf("413 must not record token usage: %+v", st.TokenUsage)
+	}
 }
 
 // TestChatOversizedBodyDefaultLimitHeader 未显式设置 MaxBodyBytes 时兜底 8MB：
@@ -275,6 +278,17 @@ func TestChatNonStreamAggregates(t *testing.T) {
 	if msg["content"] != "你好" {
 		t.Errorf("content=%q", msg["content"])
 	}
+	st, ok := h.cfg.Pool.Status("u1")
+	if !ok {
+		t.Fatal("account status missing")
+	}
+	if st.TokenUsage.RequestCount != 1 || st.TokenUsage.UsageCount != 1 ||
+		st.TokenUsage.PromptTokens != 1 || st.TokenUsage.CompletionTokens != 1 || st.TokenUsage.TotalTokens != 2 {
+		t.Errorf("token usage=%+v", st.TokenUsage)
+	}
+	if st.TokenUsage.LastLatencyMs < 1 || st.TokenUsage.LastTokensPerSecond == nil || *st.TokenUsage.LastTokensPerSecond <= 0 {
+		t.Errorf("latest performance=%+v", st.TokenUsage)
+	}
 }
 
 func TestChatStreamPassthrough(t *testing.T) {
@@ -297,6 +311,17 @@ func TestChatStreamPassthrough(t *testing.T) {
 	body := rec.Body.String()
 	if !strings.Contains(body, "你好") || !strings.Contains(body, "data: [DONE]") {
 		t.Errorf("body=%q", body)
+	}
+	st, ok := h.cfg.Pool.Status("u1")
+	if !ok {
+		t.Fatal("account status missing")
+	}
+	if st.TokenUsage.RequestCount != 1 || st.TokenUsage.UsageCount != 1 ||
+		st.TokenUsage.PromptTokens != 1 || st.TokenUsage.CompletionTokens != 1 || st.TokenUsage.TotalTokens != 2 {
+		t.Errorf("token usage=%+v", st.TokenUsage)
+	}
+	if st.TokenUsage.LastLatencyMs < 1 || st.TokenUsage.LastTokensPerSecond == nil || *st.TokenUsage.LastTokensPerSecond <= 0 {
+		t.Errorf("latest performance=%+v", st.TokenUsage)
 	}
 }
 
@@ -329,6 +354,13 @@ func TestChatRotatesOnHardCredit(t *testing.T) {
 	st, _ := p.Status("bad")
 	if !st.Cooling || st.Reason == "" {
 		t.Errorf("bad account should be cooling: %+v", st)
+	}
+	if st.TokenUsage.RequestCount != 1 || st.TokenUsage.UsageCount != 0 {
+		t.Errorf("bad token usage=%+v", st.TokenUsage)
+	}
+	good, _ := p.Status("good")
+	if good.TokenUsage.RequestCount != 1 || good.TokenUsage.TotalTokens != 2 {
+		t.Errorf("good token usage=%+v", good.TokenUsage)
 	}
 }
 

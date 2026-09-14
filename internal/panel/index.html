@@ -227,6 +227,27 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .who .nm { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who .id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-cell { min-width: 268px; }
+.usage-line {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
+  font: 600 11.5px/1.25 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.usage-item {
+  display: inline-flex; align-items: baseline; padding: 3px 6px; border: 1px solid transparent;
+  border-radius: 5px; background: var(--surface-2);
+}
+.usage-item b { font-weight: 650; }
+.usage-item em { margin-left: 2px; font: 500 10px/1 var(--sans); font-style: normal; }
+.usage-count { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 18%, transparent); }
+.usage-total {
+  color: var(--accent); background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.usage-total b { font-size: 12px; letter-spacing: -.02em; }
+.usage-total em { color: var(--ink-2); }
+.usage-latency { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 18%, transparent); }
+.usage-rate { color: var(--ok); background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 18%, transparent); }
 .cred { min-width: 84px; }
 .cred .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
 .cred .n .of { color: var(--ink-3); font-size: 11px; }
@@ -381,7 +402,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
             <th>账号</th><th>状态</th><th>积分</th>
-            <th>成功 / 失败</th><th>在途</th><th>最近成功</th><th class="c-acts"></th>
+            <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
