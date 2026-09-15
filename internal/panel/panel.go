@@ -288,6 +288,12 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	checkinMsg := ""
 	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
+		// 幂等"今天已签到"同样是已签到状态，记入签到日（供账号池展示）。
+		if upstream.IsAlreadyCheckin(err) {
+			p.cfg.Pool.NoteCheckin(uid)
+		}
+	} else {
+		p.cfg.Pool.NoteCheckin(uid)
 	}
 	resp := map[string]any{"ok": true}
 	if checkinMsg != "" {

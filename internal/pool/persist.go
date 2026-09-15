@@ -126,6 +126,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			lastSuccess:  s.LastSuccess,
 			tokenUsage:   s.TokenUsage,
 			softStreak:   s.SoftStreak,
+			checkinDate:  s.CheckinDate,
 		}
 	}
 }
@@ -202,6 +203,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			LastErr:      e.lastErr,
 			TokenUsage:   e.tokenUsage,
 			SoftStreak:   e.softStreak,
+			CheckinDate:  e.checkinDate,
 		}
 	}
 	return sf

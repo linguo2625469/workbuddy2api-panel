@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 const (
@@ -205,6 +206,12 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	checkinMsg := ""
 	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error()
+		// 幂等"今天已签到"同样记入签到日（供账号池展示）。
+		if upstream.IsAlreadyCheckin(err) {
+			p.cfg.Pool.NoteCheckin(acct.UID)
+		}
+	} else {
+		p.cfg.Pool.NoteCheckin(acct.UID)
 	}
 	remain := int64(-1)
 	total := int64(0)

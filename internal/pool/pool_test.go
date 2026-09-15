@@ -333,6 +333,137 @@ func TestCooldownPersists(t *testing.T) {
 	}
 }
 
+// NoteCheckin 记当天签到：Status 当天可见 CheckedInToday，落盘重载不丢，
+// 旧 state.json 缺 checkin_date 字段向后兼容（零值 = 未签到）。
+func TestNoteCheckinTodayAndPersist(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+
+	if st, _ := p.Status("u1"); st.CheckedInToday {
+		t.Error("fresh account must not be CheckedInToday")
+	}
+
+	p.NoteCheckin("u1")
+	st, ok := p.Status("u1")
+	if !ok || !st.CheckedInToday {
+		t.Fatalf("after NoteCheckin: %+v ok=%v", st, ok)
+	}
+	if st.CheckinDate != time.Now().Format("2006-01-02") {
+		t.Errorf("checkin_date=%q want today", st.CheckinDate)
+	}
+
+	// 不存在的 uid 是 no-op，不影响已有账号。
+	p.NoteCheckin("ghost")
+
+	p.Flush()
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"checkin_date"`) {
+		t.Errorf("state.json missing checkin_date:\n%s", raw)
+	}
+
+	// 重载后保留。
+	p2 := New(fp)
+	p2.Add(&auth.Auth{UID: "u1"})
+	st2, _ := p2.Status("u1")
+	if !st2.CheckedInToday || st2.CheckinDate != st.CheckinDate {
+		t.Errorf("checkin lost after reload: %+v", st2)
+	}
+
+	// 旧文件（无 checkin_date）→ 零值 = 未签到。
+	legacy := filepath.Join(dir, "legacy.json")
+	if err := os.WriteFile(legacy, []byte(`{"accounts":{"u2":{"credits":10}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p3 := New(legacy)
+	p3.Add(&auth.Auth{UID: "u2"})
+	if st3, _ := p3.Status("u2"); st3.CheckedInToday || st3.CheckinDate != "" {
+		t.Errorf("legacy state should have no checkin: %+v", st3)
+	}
+}
+
+// checkinDate 是旧日期时（昨天签的），CheckedInToday 必须为 false——
+// 面板展示的"当天签到状态"由此判定。
+func TestCheckedInTodayStaleDateIsFalse(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	raw := `{"accounts":{"u1":{"credits":10,"checkin_date":"` + yesterday + `"}}}`
+	if err := os.WriteFile(fp, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+	st, _ := p.Status("u1")
+	if st.CheckedInToday {
+		t.Errorf("yesterday checkin_date must not count as today: %+v", st)
+	}
+	if st.CheckinDate != yesterday {
+		t.Errorf("checkin_date=%q want %q", st.CheckinDate, yesterday)
+	}
+}
+
+// Status 序列化三态：checked_in_today=false 必须出现在 JSON 里——
+// 前端靠 字段存在与否 区分"未签到"（false）与"旧后端"（缺字段），
+// omitempty 会把 false 整个省掉，"未签到"标签退化成"—"。
+func TestStatusJSONCheckinTriState(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	st, _ := p.Status("u1")
+	raw, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"checked_in_today":false`) {
+		t.Errorf("checked_in_today=false must serialize (frontend tri-state):\n%s", raw)
+	}
+	p.NoteCheckin("u1")
+	st, _ = p.Status("u1")
+	raw, _ = json.Marshal(st)
+	if !strings.Contains(string(raw), `"checked_in_today":true`) {
+		t.Errorf("checked_in_today=true must serialize:\n%s", raw)
+	}
+}
+
+// NoteTravel 旅行状态快照：Status 透出，且不落盘（运行态——重启后归零，
+// 由下一轮余额刷新探测恢复）。
+func TestNoteTravelRuntimeOnly(t *testing.T) {	dir := t.TempDir()
+	fp := filepath.Join(dir, "state.json")
+	p := New(fp)
+	p.Add(&auth.Auth{UID: "u1"})
+
+	if st, _ := p.Status("u1"); st.TravelState != "" {
+		t.Errorf("fresh account travel_state=%q want empty", st.TravelState)
+	}
+
+	p.NoteTravel("u1", "traveling", true)
+	st, ok := p.Status("u1")
+	if !ok || st.TravelState != "traveling" || !st.TravelDailyDone {
+		t.Fatalf("after NoteTravel: %+v ok=%v", st, ok)
+	}
+
+	p.NoteTravel("u1", "idle", false)
+	if st, _ = p.Status("u1"); st.TravelState != "idle" || st.TravelDailyDone {
+		t.Errorf("after second NoteTravel: %+v", st)
+	}
+
+	// 落盘验证：先制造一次真实变更（SetCredits 置 dirty）让 Flush 真的写文件，
+	// 再断言旅行快照字段不进 state.json。
+	p.SetCredits("u1", 10, 100)
+	p.Flush()
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "travel_state") {
+		t.Errorf("travel snapshot must not persist:\n%s", raw)
+	}
+}
+
 func TestDisablePersists(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "state.json")

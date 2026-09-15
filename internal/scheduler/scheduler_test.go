@@ -194,6 +194,14 @@ type fakeUpstream struct {
 	checkinCalls   atomic.Int32
 	refreshCalls   atomic.Int32
 	resourceRemain int64
+	// heatmapChecked 今日 heatmap cell 是否有分（模拟"其他渠道已签到"）；
+	// heatmapSet 为 false 时返回今日 cell score=0（未签）。
+	heatmapSet bool
+	// travelBuddyNil 模拟无猫（buddy/info 返回 null）；
+	// travelState 模拟 travel/status 的 state（idle/traveling/arrived）。
+	heatmapCalls atomic.Int32
+	travelBuddyNil bool
+	travelState    string
 }
 
 func (f *fakeUpstream) server() *httptest.Server {
@@ -208,6 +216,23 @@ func (f *fakeUpstream) server() *httptest.Server {
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
 			f.refreshCalls.Add(1)
 			w.Write([]byte(`{"code":0,"data":{"accessToken":"new","expiresIn":3600}}`))
+		case strings.HasSuffix(r.URL.Path, "/activity/growth/heatmap"):
+			f.heatmapCalls.Add(1)
+			score := 0
+			if f.heatmapSet {
+				score = 10
+			}
+			w.Write([]byte(`{"code":0,"data":{"cells":[{"date":"` + time.Now().Format("2006-01-02") +
+				`","score":` + jsonI64(int64(score)) + `}]}}`))
+		case strings.HasSuffix(r.URL.Path, "/activity/growth/buddy/info"):
+			if f.travelBuddyNil {
+				w.Write([]byte(`{"code":0,"data":{"buddy":null}}`))
+			} else {
+				w.Write([]byte(`{"code":0,"data":{"buddy":{"id":1,"name":"cat"}}}`))
+			}
+		case strings.HasSuffix(r.URL.Path, "/activity/growth/buddy/travel/status"):
+			w.Write([]byte(`{"code":0,"data":{"state":"` + f.travelState +
+				`","daily_limit_reached":false,"record_id":0,"reward_credit":0}}`))
 		default:
 			http.Error(w, "not found", 404)
 		}
@@ -250,6 +275,83 @@ func TestRunCheckinReenablesCoolingAccount(t *testing.T) {
 	}
 	if st.Credits != 500 {
 		t.Errorf("credits=%d want 500", st.Credits)
+	}
+}
+
+// 余额刷新（后台周期/面板手动）对本地未记今日签到的账号做外部签到探测：
+// 上游 heatmap 今日 cell 有分（其他渠道签过）→ 补记 NoteCheckin。
+func TestRunBalanceRefreshProbesExternalCheckin(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 100, heatmapSet: true}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	if st, _ := p.Status("u1"); st.CheckedInToday {
+		t.Fatal("precondition: u1 not checked in today")
+	}
+	s.RunBalanceRefreshNow()
+	if st, _ := p.Status("u1"); !st.CheckedInToday {
+		t.Errorf("external checkin should be recorded: %+v", st)
+	}
+	if f.heatmapCalls.Load() != 1 {
+		t.Errorf("heatmap calls=%d want 1", f.heatmapCalls.Load())
+	}
+
+	// 第二轮：已记今日签到，不再探测（heatmap 调用数不涨）。
+	s.RunBalanceRefreshNow()
+	if f.heatmapCalls.Load() != 1 {
+		t.Errorf("heatmap calls=%d after second refresh, want still 1（已记不再探测）", f.heatmapCalls.Load())
+	}
+	if st, _ := p.Status("u1"); !st.CheckedInToday {
+		t.Errorf("checkin record lost: %+v", st)
+	}
+}
+
+// 今日 cell 无分（上游显示未签）→ 不补记，状态保持未签到。
+func TestRunBalanceRefreshNoExternalCheckin(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 100, heatmapSet: false}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunBalanceRefreshNow()
+	if st, _ := p.Status("u1"); st.CheckedInToday {
+		t.Errorf("no external checkin should keep unchecked: %+v", st)
+	}
+}
+
+// 余额刷新周期搭车的旅行状态探测：有猫 + 上游 travel/status 返回状态 →
+// 写入池快照（面板旅行列）；无猫写合成态 none（提示需先领养）。
+func TestRunBalanceRefreshProbesTravelState(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 100, travelState: "traveling"}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	s.RunBalanceRefreshNow()
+	st, _ := p.Status("u1")
+	if st.TravelState != "traveling" {
+		t.Errorf("travel_state=%q want traveling", st.TravelState)
+	}
+
+	// 无猫：快照推进为 none。
+	f.travelBuddyNil = true
+	s.RunBalanceRefreshNow()
+	st, _ = p.Status("u1")
+	if st.TravelState != "none" {
+		t.Errorf("no-buddy should set travel snapshot none, got %q", st.TravelState)
 	}
 }
 
