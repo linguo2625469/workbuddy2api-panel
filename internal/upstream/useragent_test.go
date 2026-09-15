@@ -133,11 +133,18 @@ func TestFetchModelsUsesConfiguredUA(t *testing.T) {
 	a := &auth.Auth{AccessToken: "at", UID: "u1"}
 	c := &Client{
 		HTTP: &http.Client{Transport: rtFunc(func(r *http.Request) (*http.Response, error) {
-			if !strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models") {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models"):
+				if got := r.Header.Get("User-Agent"); got != "FetchAgent/2" {
+					t.Errorf("personal/models UA = %q want FetchAgent/2", got)
+				}
+			case strings.HasSuffix(r.URL.Path, "/v3/config"):
+				if got := r.Header.Get("User-Agent"); got != codeBuddyIDEUA {
+					t.Errorf("v3/config UA = %q want %s", got, codeBuddyIDEUA)
+				}
+				return jsonResp(200, `{"code":0,"data":{"models":[]}}`), nil
+			default:
 				t.Errorf("path=%s", r.URL.Path)
-			}
-			if got := r.Header.Get("User-Agent"); got != "FetchAgent/2" {
-				t.Errorf("FetchModels UA = %q want FetchAgent/2", got)
 			}
 			return jsonResp(200, `{"code":0,"data":{"models":[{"id":"glm-5.2","name":"GLM","maxInputTokens":131072,"maxOutputTokens":8192,"reasoning":{"effort":"high","supportedEfforts":[]},"disabled":false}],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`), nil
 		})},

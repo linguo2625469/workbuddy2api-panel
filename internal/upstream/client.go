@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -781,8 +782,16 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	return false
 }
 
+// codeBuddyIDEUA /v3/config 要求能解析出 CodeBuddy 版本号的 UA。
+// CLI 三段式 WorkBuddy UA 会拿到精简目录（flash 输出 128K、无 supportedEfforts）；
+// 官方 IDE 头 `CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0` 才返回完整能力
+// （flash：393216 + low/high/max）。
+const codeBuddyIDEUA = "CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0"
+
 // FetchModels 调上游动态模型接口。
 // 字段名与上游实际返回对齐：maxInputTokens（非 contextWindow）、maxOutputTokens（非 maxTokens）。
+// CLI 目录（/console/enterprises/personal/models）决定「能调哪些模型」；
+// IDE /v3/config 覆盖同名模型的窗口 / 思考档（失败则静默保留 CLI 字段）。
 func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	url := c.chatBase(a) + "/console/enterprises/personal/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -881,6 +890,9 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	if len(out) == 0 {
 		return nil, fmt.Errorf("models api returned empty list")
 	}
+	if overlay, err := c.fetchV3ConfigModelMap(a); err == nil && len(overlay) > 0 {
+		out = mergeModelCapabilities(out, overlay)
+	}
 	// 刷新 effort 能力缓存（供请求体降级；无 supportedEfforts 的模型不入缓存）。
 	cache := make(map[string][]string, len(out))
 	defCache := make(map[string]string, len(out))
@@ -904,6 +916,149 @@ func (c *Client) FetchModels(a *auth.Auth) ([]ModelInfo, error) {
 	c.defaultEfforts[realmKey(a.Realm())] = defCache
 	c.effortsMu.Unlock()
 	return out, nil
+}
+
+// v3ConfigDomain /v3/config 的 X-Domain：优先账号落盘 domain，否则 chatBase host。
+func v3ConfigDomain(a *auth.Auth, chatBase string) string {
+	if a != nil {
+		if d := strings.TrimSpace(a.Domain); d != "" {
+			d = strings.TrimPrefix(d, "https://")
+			d = strings.TrimPrefix(d, "http://")
+			return strings.TrimSuffix(d, "/")
+		}
+	}
+	if u, err := url.Parse(chatBase); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "copilot.tencent.com"
+}
+
+// fetchV3ConfigModelMap 拉官方 IDE 配置目录，按模型 id 建能力表。
+// 该端点对 UA 敏感：必须带 CodeBuddy/CodeBuddyIDE 版本，否则 400 code=12403。
+func (c *Client) fetchV3ConfigModelMap(a *auth.Auth) (map[string]ModelInfo, error) {
+	req, err := http.NewRequest(http.MethodGet, c.chatBase(a)+"/v3/config", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("Authorization", "Bearer "+a.AccessToken)
+	if a != nil && a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
+	}
+	req.Header.Set("X-Domain", v3ConfigDomain(a, c.chatBase(a)))
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("User-Agent", codeBuddyIDEUA)
+	c.injectCodeBuddyRequest(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("v3/config status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+	}
+	var env struct {
+		Code int `json:"code"`
+		Data struct {
+			Models []struct {
+				ID                string `json:"id"`
+				Name              string `json:"name"`
+				MaxInputTokens    int64  `json:"maxInputTokens"`
+				MaxOutputTokens   int64  `json:"maxOutputTokens"`
+				MaxAllowedSize    int64  `json:"maxAllowedSize"`
+				Credits           string `json:"credits"`
+				SupportsReasoning bool   `json:"supportsReasoning"`
+				SupportsImages    bool   `json:"supportsImages"`
+				Reasoning         struct {
+					Effort             string   `json:"effort"`
+					DefaultEffort      string   `json:"defaultEffort"`
+					CanDisableThinking bool     `json:"canDisableThinking"`
+					SupportedEfforts   []string `json:"supportedEfforts"`
+				} `json:"reasoning"`
+			} `json:"models"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, fmt.Errorf("v3/config parse: %w", err)
+	}
+	if env.Code != 0 {
+		return nil, fmt.Errorf("v3/config code=%d", env.Code)
+	}
+	out := make(map[string]ModelInfo, len(env.Data.Models))
+	for _, m := range env.Data.Models {
+		if strings.TrimSpace(m.ID) == "" {
+			continue
+		}
+		def := m.Reasoning.DefaultEffort
+		if def == "" {
+			def = m.Reasoning.Effort
+		}
+		out[m.ID] = ModelInfo{
+			ID:                 m.ID,
+			Name:               m.Name,
+			ContextWindow:      m.MaxInputTokens,
+			MaxTokens:          m.MaxOutputTokens,
+			MaxAllowedSize:     m.MaxAllowedSize,
+			Efforts:            m.Reasoning.SupportedEfforts,
+			DefaultEffort:      def,
+			CanDisableThinking: m.Reasoning.CanDisableThinking,
+			SupportsReasoning:  m.SupportsReasoning,
+			SupportsImages:     m.SupportsImages,
+			Credits:            m.Credits,
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("v3/config returned empty models")
+	}
+	return out, nil
+}
+
+// mergeModelCapabilities 用 IDE /v3/config 覆盖 CLI 目录里同 id 的窗口与思考档。
+// 只填 overlay 里有值的字段，避免空配置把 CLI 已解析结果抹掉。
+func mergeModelCapabilities(base []ModelInfo, overlay map[string]ModelInfo) []ModelInfo {
+	if len(overlay) == 0 {
+		return base
+	}
+	for i, mi := range base {
+		ov, ok := overlay[mi.ID]
+		if !ok {
+			continue
+		}
+		if ov.ContextWindow > 0 {
+			mi.ContextWindow = ov.ContextWindow
+		}
+		if ov.MaxTokens > 0 {
+			mi.MaxTokens = ov.MaxTokens
+		}
+		if ov.MaxAllowedSize > 0 {
+			mi.MaxAllowedSize = ov.MaxAllowedSize
+		}
+		if len(ov.Efforts) > 0 {
+			mi.Efforts = ov.Efforts
+		}
+		if ov.DefaultEffort != "" {
+			mi.DefaultEffort = ov.DefaultEffort
+		}
+		if ov.CanDisableThinking {
+			mi.CanDisableThinking = true
+		}
+		if ov.SupportsReasoning {
+			mi.SupportsReasoning = true
+		}
+		if ov.SupportsImages {
+			mi.SupportsImages = true
+		}
+		if ov.Credits != "" {
+			mi.Credits = ov.Credits
+		}
+		if ov.Name != "" {
+			mi.Name = ov.Name
+		}
+		base[i] = mi
+	}
+	return base
 }
 
 // UserResource 查询账号积分余额与总额度（所有套餐聚合）。remain 负值钳 0；
