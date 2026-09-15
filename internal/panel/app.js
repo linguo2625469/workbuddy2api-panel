@@ -144,7 +144,7 @@ go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accou
 function renderAccounts(list) {
   const tb = $('accBody');
   if (!list.length) {
-    tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="11"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
@@ -174,10 +174,32 @@ function renderAccounts(list) {
     const latency = formatLatency(tu.last_latency_ms);
     const rate = formatRate(tu.last_tokens_per_second);
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
+    // 今日签到：checked_in_today 后端按本地自然日判定；缺字段（旧后端）显示 —。
+    const checked = s.checked_in_today;
+    const checkinTag = checked === true
+      ? '<span class="tag ok" title="最近签到日：' + esc(s.checkin_date || '今天') + '">已签到</span>'
+      : checked === false
+        ? '<span class="tag mute" title="' + (s.checkin_date ? '最近签到日：' + esc(s.checkin_date) : '尚无签到记录') + '">未签到</span>'
+        : '<span style="color:var(--ink-3)">—</span>';
+    // 旅行状态：idle（可派/今日已派）| traveling（在途）| arrived（可领奖）| none（无猫）；空 = 未探测。
+    let travelTag = '<span style="color:var(--ink-3)">—</span>';
+    if (s.travel_state === 'traveling') {
+      travelTag = '<span class="tag warn" title="猫猫在途中，到站后可领奖">在途</span>';
+    } else if (s.travel_state === 'arrived') {
+      travelTag = '<span class="tag ok" title="猫猫已到站，可领奖（旅行巡检会自动领）">可领奖</span>';
+    } else if (s.travel_state === 'idle') {
+      travelTag = s.travel_daily_done
+        ? '<span class="tag mute" title="今日已派出过，明天 00:00（北京时间）重置">今日已派</span>'
+        : '<span class="tag ok" title="空闲：现在就能派去旅行">可派出</span>';
+    } else if (s.travel_state === 'none') {
+      travelTag = '<span class="tag mute" title="还没有猫：旅行巡检会自动领养（过对话门槛后 +300 分）">无猫</span>';
+    }
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
       '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + '</td>' +
+      '<td>' + checkinTag + '</td>' +
+      '<td>' + travelTag + '</td>' +
       '<td class="cred" title="' + credTip + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
       '<td class="num">' + (s.in_flight || 0) + '</td>' +

@@ -118,6 +118,32 @@ func (c *Client) HeatmapYesterdayMissed(a *auth.Auth) (bool, error) {
 	return false, nil
 }
 
+// HeatmapTodayChecked 只读探测"今天是否已签到"（growth heatmap 今日 cell score>0）。
+// 供本地无签到记录时对上游核对（账号可能在官方客户端等其他渠道签到过）。
+// 今日 cell 缺失（上游未生成）返回 (false, nil)——与漏签不可区分，调用方按未签处理。
+func (c *Client) HeatmapTodayChecked(a *auth.Auth) (bool, error) {
+	today := time.Now().Format("2006-01-02")
+	data, err := c.growthJSON(a, http.MethodGet, "/activity/growth/heatmap", nil)
+	if err != nil {
+		return false, err
+	}
+	var resp struct {
+		Cells []struct {
+			Date  string `json:"date"`
+			Score int    `json:"score"`
+		} `json:"cells"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return false, err
+	}
+	for _, cell := range resp.Cells {
+		if len(cell.Date) >= 10 && cell.Date[:10] == today {
+			return cell.Score > 0, nil
+		}
+	}
+	return false, nil
+}
+
 // UseMakeupCard 对指定日期使用补签卡（保住连登连续天数；无卡返回业务错误）。
 func (c *Client) UseMakeupCard(a *auth.Auth, date string) error {
 	_, err := c.growthJSON(a, http.MethodPost, "/activity/growth/makeup-cards/use",

@@ -129,6 +129,29 @@ func (p *Pool) NoteError(uid string) {
 	}
 }
 
+// NoteCheckin 记一次"当天已签到"（签到成功或上游幂等回复"今天已签到"时调用）。
+// 记本地时区自然日（与上游签到重置口径一致）；跨天后 CheckedInToday 自然为 false。
+func (p *Pool) NoteCheckin(uid string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.checkinDate = time.Now().Format("2006-01-02")
+		p.dirty.Store(true)
+	}
+}
+
+// NoteTravel 更新账号的猫猫旅行状态快照（运行态，不落盘）。state 为上游
+// idle/traveling/arrived；dailyDone 为 daily_limit_reached（今日已派）。
+// 旅行巡检执行动作前后与余额刷新周期的只读探测都调用它。
+func (p *Pool) NoteTravel(uid, state string, dailyDone bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if e, ok := p.byUID[uid]; ok {
+		e.travelState = state
+		e.travelDailyDone = dailyDone
+	}
+}
+
 // NoteSuccess 成功请求累加成功计数、刷新 lastSuccess，并清空连续失败与熔断运行态。
 // 二进制模型：清 fails + retryCount + breakerUntil；不碰 until/coolKind（那些是即时冷却，各自到期）。
 // 额外清 softStreak：成功是账号已恢复的最强证据，连续软限流计数就此归零、退避回到基数。
@@ -379,6 +402,12 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		InFlight:        int(e.inFlight.Load()),
 		BreakerFails:    e.fails,
 		BreakerUntil:    e.breakerUntil,
+		CheckinDate:     e.checkinDate,
+		TravelState:     e.travelState,
+		TravelDailyDone: e.travelDailyDone,
+	}
+	if st.CheckinDate != "" {
+		st.CheckedInToday = st.CheckinDate == now.Format("2006-01-02")
 	}
 	if st.Disabled {
 		// 禁用账号透出禁用原因（运维看不到为什么死）。

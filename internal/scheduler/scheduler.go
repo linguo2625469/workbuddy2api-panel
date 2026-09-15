@@ -264,10 +264,13 @@ func (s *Scheduler) RunCheckinNow() {
 			// "今天已签到"是幂等成功（上游对重复签到返回 code!=0），不再当失败打 error 行。
 			if upstream.IsAlreadyCheckin(err) {
 				log.Printf("checkin %s: 今天已签到（幂等）", st.UID)
+				s.cfg.Pool.NoteCheckin(st.UID) // 幂等确认 = 当天已签到，记入签到日
 			} else {
 				log.Printf("checkin %s: %v", st.UID, err)
 			}
 			// 其余业务错误也继续走余额查询
+		} else {
+			s.cfg.Pool.NoteCheckin(st.UID)
 		}
 		remain, total, err := s.cfg.Upstream.UserResource(a)
 		if err != nil {
@@ -363,6 +366,10 @@ func (s *Scheduler) RunKeepaliveNow() {
 // 解冻语义与签到一致（ReenableIfCredits：余额 > 0 的冷却账号自动解冻），
 // 但不做签到、不刷新 token——只让"积分"这个观测量保持新鲜。
 // 供两类入口复用：后台周期任务（StartBalanceRefresh）与面板手动全量刷新。
+//
+// 同时做"外部签到探测"：本地未记录今日签到的账号查一次 growth heatmap，
+// 今天 cell 有分（在官方客户端等其他渠道签过）即补记 NoteCheckin。
+// 只读探测，不改任何签到/冷却状态；探测过（已记今日）的自然跳过。
 func (s *Scheduler) RunBalanceRefreshNow() {
 	var wg sync.WaitGroup
 	for _, st := range s.cfg.Pool.List() {
@@ -374,17 +381,54 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			continue
 		}
 		wg.Add(1)
-		go func(a *auth.Auth, uid string) {
+		go func(a *auth.Auth, uid string, checkedToday bool) {
 			defer wg.Done()
+			if !checkedToday {
+				s.probeExternalCheckin(a, uid)
+			}
+			s.probeTravelState(a, uid)
 			remain, total, err := s.cfg.Upstream.UserResource(a)
 			if err != nil {
 				log.Printf("balance %s: %v", uid, err)
 				return
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
-		}(a, st.UID)
+		}(a, st.UID, st.CheckedInToday)
 	}
 	wg.Wait()
+}
+
+// probeExternalCheckin 只读探测账号是否在其他渠道签到过今天（heatmap 今日 cell），
+// 是则补记 NoteCheckin。失败静默（下一轮余额刷新再试），不阻塞余额主流程。
+func (s *Scheduler) probeExternalCheckin(a *auth.Auth, uid string) {
+	checked, err := s.cfg.Upstream.HeatmapTodayChecked(a)
+	if err != nil {
+		return
+	}
+	if checked {
+		s.cfg.Pool.NoteCheckin(uid)
+		log.Printf("checkin %s: 检测到今日已在其他渠道签到（heatmap 补记）", uid)
+	}
+}
+
+// probeTravelState 只读探测账号的猫猫旅行状态并写入池快照（供面板展示
+// "何时能手动派旅行"）：无猫写合成态 none（前端提示需先领养），有猫透传
+// travel/status 的 state。查询失败保留旧快照（静默，下一轮余额刷新再试）。
+// 与 probeExternalCheckin 同在余额刷新周期搭车。
+func (s *Scheduler) probeTravelState(a *auth.Auth, uid string) {
+	buddy, err := s.cfg.Upstream.BuddyInfo(a)
+	if err != nil {
+		return
+	}
+	if buddy == nil {
+		s.cfg.Pool.NoteTravel(uid, travelStateNoBuddy, false)
+		return
+	}
+	ts, err := s.cfg.Upstream.TravelStatus(a)
+	if err != nil {
+		return
+	}
+	s.cfg.Pool.NoteTravel(uid, ts.State, ts.DailyLimitReached)
 }
 
 // StartBalanceRefresh 后台周期性余额刷新（独立 ticker goroutine，ctx 取消即停）。

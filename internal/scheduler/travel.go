@@ -19,6 +19,8 @@ const (
 	travelStateIdle      = "idle"
 	travelStateTraveling = "traveling"
 	travelStateArrived   = "arrived"
+	// travelStateNoBuddy 无猫（buddy null，需先领养）。非上游 state，是本网关的合成值。
+	travelStateNoBuddy = "none"
 )
 
 // travelAccountDelay 账号间限速：全量账号约 40s，避免上游风控。测试可置 0。
@@ -62,6 +64,7 @@ func (s *Scheduler) RunTravelNow() {
 }
 
 // travelOne 单账号单趟状态机：查有无猫 + 查状态 + 最多一个动作，不轮询不等待。
+// 查到的状态顺手写入池快照（面板旅行状态列），无猫同样写空态标记。
 func (s *Scheduler) travelOne(a *auth.Auth) {
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)
 	if err != nil {
@@ -69,6 +72,7 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 		return
 	}
 	if buddy == nil {
+		s.cfg.Pool.NoteTravel(a.UID, travelStateNoBuddy, false)
 		s.travelAdopt(a)
 		return
 	}
@@ -77,6 +81,7 @@ func (s *Scheduler) travelOne(a *auth.Auth) {
 		log.Printf("travel %s: status: %v", a.UID, err)
 		return
 	}
+	s.cfg.Pool.NoteTravel(a.UID, ts.State, ts.DailyLimitReached)
 	switch ts.State {
 	case travelStateArrived:
 		s.travelClaim(a, ts)
@@ -99,6 +104,8 @@ func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) {
 		log.Printf("travel %s: depart: %v", a.UID, err)
 		return
 	}
+	// 派出成功：快照推进为 traveling + 今日已派（面板立即可见）。
+	s.cfg.Pool.NoteTravel(a.UID, travelStateTraveling, true)
 	log.Printf("travel %s: depart ok location=%d", a.UID, travelLocationID)
 }
 
@@ -113,6 +120,8 @@ func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) {
 		log.Printf("travel %s: claim record=%d: %v", a.UID, ts.RecordID, err)
 		return
 	}
+	// 领奖成功：快照回 idle（今日已派与否由上游 daily_limit 保持）。
+	s.cfg.Pool.NoteTravel(a.UID, travelStateIdle, ts.DailyLimitReached)
 	log.Printf("travel %s: claim ok record=%d reward=%d", a.UID, ts.RecordID, reward)
 }
 
@@ -140,6 +149,8 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 	err := s.cfg.Upstream.BuddyFirst(a)
 	switch {
 	case err == nil:
+		// 领养成功：有猫且空闲，可派旅行（面板快照随即推进）。
+		s.cfg.Pool.NoteTravel(a.UID, travelStateIdle, false)
 		log.Printf("travel %s: adopt ok (+300 credits)", a.UID)
 	case upstream.IsBuddyTaskIncomplete(err):
 		s.markAdoptTried(a.UID)

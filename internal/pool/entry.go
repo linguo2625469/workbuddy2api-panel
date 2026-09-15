@@ -73,6 +73,16 @@ type Status struct {
 	LastSuccessTime time.Time  `json:"last_success,omitempty"`
 	LastErrTime     time.Time  `json:"last_err,omitempty"`
 	TokenUsage      TokenUsage `json:"token_usage,omitempty"`
+	// CheckedInToday 今天（后端本地时区自然日）是否已签到；CheckinDate 是最近签到日。
+	// 布尔由后端判定，避免前端时区/日期线偏差。
+	// 注意：不得加 omitempty——false 是有效三态（未签到），省略后前端无法与
+	// "旧后端无此字段"区分，"未签到"标签会退化成"—"（JSON 测试见 pool_test）。
+	CheckedInToday bool   `json:"checked_in_today"`
+	CheckinDate    string `json:"checkin_date,omitempty"`
+	// TravelState 猫猫旅行状态快照（idle/traveling/arrived；空 = 未探测）。
+	// TravelDailyDone = 今日已派出（CST 00:00 重置）。供面板展示"何时能手动派旅行"。
+	TravelState     string `json:"travel_state,omitempty"`
+	TravelDailyDone bool   `json:"travel_daily_done,omitempty"`
 	// 运行态（不持久化）：在途请求数 + 熔断器状态。
 	InFlight     int       `json:"in_flight"`
 	BreakerFails int       `json:"breaker_fails"`
@@ -103,6 +113,17 @@ type entry struct {
 	// 重置点只有两处（都是账号被证明恢复的时刻）：NoteSuccess、reviveCoolingLocked。
 	// 持久化（stateAccount.SoftStreak）：重启后软限流仍在退避，不因重启回到基数。
 	softStreak int
+	// checkinDate 最近一次签到成功的自然日（本地时区 "2006-01-02"）；空 = 从未签到。
+	// 由 NoteCheckin 记录（签到成功 / 幂等"今天已签到"），持久化——重启/跨天不丢，
+	// 面板据此展示"当天签到状态"。只记日期不记时间：签到状态是自然日粒度观测量。
+	checkinDate string
+	// travelState/travelDailyDone 猫猫旅行状态快照（运行态，不持久化——分钟级观测量，
+	// 持久化反而会把重启前的旧状态误导成当前状态）。由 NoteTravel 写入：
+	// 旅行巡检执行时 + 余额刷新周期的只读探测。state 取上游 idle/traveling/arrived；
+	// dailyDone 对应 daily_limit_reached（今日已派，CST 00:00 重置）。
+	// travelState 为空 = 尚无快照（未探测过）。
+	travelState    string
+	travelDailyDone bool
 	// softRateModel 触发 6004 模型级限流时的模型名（issue #31 模型豁免）。
 	// 仅当冷却由「带解析时间的 6004」触发时记录；空 = 普通软冷却（不豁免）。
 	// 运行态语义（不持久化）：重启清零，退化为现状。
@@ -197,6 +218,8 @@ type stateAccount struct {
 	// SoftStreak 连续软冷却次数（软退避指数）。旧 state.json 缺此字段 → 零值，
 	// 退避从基数重新开始（向后兼容）。
 	SoftStreak int `json:"soft_streak,omitempty"`
+	// CheckinDate 最近一次签到成功的自然日（"2006-01-02"）；空 = 从未签到。
+	CheckinDate string `json:"checkin_date,omitempty"`
 }
 
 // stateFile 持久化格式。
