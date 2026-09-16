@@ -533,7 +533,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <section class="view" id="view-models" hidden>
       <div class="box">
         <header>
-          <h3>模型能力 <span class="hint">官方返回的最大输出仅为参考——实测多数模型实际被限制在 40K 左右（如 deepseek-v4.1-flash 仅 32K），配置 max_tokens 时请自行留意，以免长输出被静默截断</span></h3>
+          <h3>模型能力 <span class="hint">模型名称一栏就是调用时要填写的完整值；国际版请使用 global:deepseek-v4.1-flash，不要去掉 global: 前缀。官方返回的最大输出仅为参考——实测多数模型实际被限制在 40K 左右</span></h3>
           <span class="grow"></span>
           <span class="note" id="mdNote">实时查询上游</span>
           <button class="xs" id="btnModels">重新获取</button>

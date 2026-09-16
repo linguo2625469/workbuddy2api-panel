@@ -248,15 +248,36 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "没有可用账号：请先在面板添加账号再查询")
 		return
 	}
-	infos, err := p.cfg.Upstream.FetchModels(acct)
-	if err != nil {
-		writeErr(w, http.StatusBadGateway, "fetch models: "+err.Error())
-		return
+	var infos []upstream.ModelInfo
+	if acct.IsGlobal() {
+		// 国际版账号使用独立的模型目录接口。此前这里无论账号 realm
+		// 都调用 FetchModels（CN 的 /console/enterprises/personal/models），
+		// 导致国际版面板“模型与挡位”直接收到上游 500。
+		infos = p.cfg.Upstream.FetchGlobalModelInfos(acct)
+		if len(infos) == 0 {
+			writeErr(w, http.StatusBadGateway, "fetch global models: 上游未返回可用模型")
+			return
+		}
+	} else {
+		var err error
+		infos, err = p.cfg.Upstream.FetchModels(acct)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "fetch models: "+err.Error())
+			return
+		}
 	}
 	out := make([]map[string]any, 0, len(infos))
+	modelPrefix := ""
+	if acct.IsGlobal() {
+		modelPrefix = "global:"
+	} else {
+		modelPrefix = "cn:"
+	}
 	for _, mi := range infos {
 		out = append(out, map[string]any{
-			"id":                   mi.ID,
+			// 面板返回的模型名就是网关实际要求的 model 值，避免国际版
+			// 被客户端误填成裸名后按 CN realm 路由。
+			"id":                   modelPrefix + mi.ID,
 			"name":                 mi.Name,
 			"context_length":       mi.ContextWindow,
 			"max_output_tokens":    mi.MaxTokens,

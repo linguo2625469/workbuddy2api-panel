@@ -44,3 +44,15 @@ docs/
 /cmd/desktopverify*/
 *.zip
 server.exe
+
+# 本地发布/运行产物：打包目录内含真实 config.json、auths、data，绝不进版本库
+release-test/
+_release_stage/
+_zipcheck/
+
+# 运行期产物（双击 exe 形态下生成，只在本机有意义）
+runtime.log
+startup-error.txt
+*.log
+server.pid
+/wb2api.exe~

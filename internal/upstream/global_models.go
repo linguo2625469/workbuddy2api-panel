@@ -237,85 +237,111 @@ func (c *Client) globalModelsOnce(a *auth.Auth, path string) ([]ModelInfo, error
 // credits（倍率）**恒不解析**（PLAN §3.D2：倍率不进 global 路径）。
 // 解析成功但名单为空 → 返回错误（调用方回落静态，等价"该端点没给全"）。
 func parseGlobalModelInfos(raw []byte) ([]ModelInfo, error) {
-	var env struct {
-		Code int             `json:"code"`
-		Data json.RawMessage `json:"data"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return nil, fmt.Errorf("global models parse: %w", err)
 	}
-	if env.Code != 0 {
-		return nil, fmt.Errorf("global models code=%d", env.Code)
+	if codeRaw, ok := envelope["code"]; ok {
+		var code int
+		if err := json.Unmarshal(codeRaw, &code); err == nil && code != 0 {
+			return nil, fmt.Errorf("global models code=%d", code)
+		}
 	}
-	trimmed := strings.TrimSpace(string(env.Data))
-	if strings.HasPrefix(trimmed, "[") {
-		// 窄表形态：data 为字符串数组。
-		var arr []string
-		if err := json.Unmarshal(env.Data, &arr); err != nil {
-			return nil, fmt.Errorf("global models parse (narrow): %w", err)
-		}
-		out := make([]ModelInfo, 0, len(arr))
-		for _, id := range arr {
-			if id = strings.TrimSpace(id); id != "" {
-				out = append(out, ModelInfo{ID: id})
-			}
-		}
-		if len(out) == 0 {
-			return nil, fmt.Errorf("global models empty list")
-		}
-		return out, nil
+	payload := json.RawMessage(raw)
+	if data, ok := envelope["data"]; ok && len(strings.TrimSpace(string(data))) > 0 && string(data) != "null" {
+		payload = data
 	}
-	// 对象形态：data.models[]，字段名与 CN 目录一致（maxInputTokens/maxOutputTokens/…）。
-	var obj struct {
-		Models []struct {
-			ID                string   `json:"id"`
-			Name              string   `json:"name"`
-			MaxInputTokens    int64    `json:"maxInputTokens"`
-			MaxOutputTokens   int64    `json:"maxOutputTokens"`
-			MaxAllowedSize    int64    `json:"maxAllowedSize"`
-			Disabled          bool     `json:"disabled"`
-			SupportsReasoning bool     `json:"supportsReasoning"`
-			SupportsImages    bool     `json:"supportsImages"`
-			Reasoning         struct {
-				Effort             string   `json:"effort"`        // 老模型键
-				DefaultEffort      string   `json:"defaultEffort"` // 新模型键
-				CanDisableThinking bool     `json:"canDisableThinking"`
-				SupportedEfforts   []string `json:"supportedEfforts"`
-			} `json:"reasoning"`
-		} `json:"models"`
-	}
-	if err := json.Unmarshal(env.Data, &obj); err != nil {
-		return nil, fmt.Errorf("global models parse: %w", err)
-	}
-	out := make([]ModelInfo, 0, len(obj.Models))
-	for _, m := range obj.Models {
-		id := strings.TrimSpace(m.ID)
-		if id == "" {
-			id = strings.TrimSpace(m.Name)
+	out, err := parseGlobalModelPayload(payload)
+	if err != nil || len(out) == 0 {
+		if err != nil {
+			return nil, fmt.Errorf("global models parse: %w", err)
 		}
-		if id == "" || m.Disabled {
-			continue
-		}
-		def := m.Reasoning.Effort
-		if def == "" {
-			def = m.Reasoning.DefaultEffort // 新旧双键兼容，与 CN 侧同款
-		}
-		out = append(out, ModelInfo{
-			ID:                 id,
-			Name:               m.Name,
-			ContextWindow:      m.MaxInputTokens,
-			MaxTokens:          m.MaxOutputTokens,
-			MaxAllowedSize:     m.MaxAllowedSize,
-			Efforts:            m.Reasoning.SupportedEfforts,
-			DefaultEffort:      def,
-			CanDisableThinking: m.Reasoning.CanDisableThinking,
-			SupportsReasoning:  m.SupportsReasoning,
-			SupportsImages:     m.SupportsImages,
-			// Credits 故意留空：PLAN §3.D2，倍率不进入 global 路径。
-		})
-	}
-	if len(out) == 0 {
 		return nil, fmt.Errorf("global models empty list")
 	}
 	return out, nil
+}
+
+// parseGlobalModelPayload 兼容国际站不同版本的模型目录：data 直接数组、
+// data.models/data.items，以及顶层 models/items。国际站曾在这几种 envelope 之间切换，
+// 只支持 data.models 会把登录成功的账号误判为“无模型”。
+func parseGlobalModelPayload(raw json.RawMessage) ([]ModelInfo, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	return parseGlobalModelValue(value)
+}
+
+func parseGlobalModelValue(value any) ([]ModelInfo, error) {
+	switch v := value.(type) {
+	case []any:
+		out := make([]ModelInfo, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				if id := strings.TrimSpace(s); id != "" {
+					out = append(out, ModelInfo{ID: id})
+				}
+				continue
+			}
+			if obj, ok := item.(map[string]any); ok {
+				if mi, ok := parseGlobalModelObject(obj); ok {
+					out = append(out, mi)
+				}
+			}
+		}
+		return out, nil
+	case map[string]any:
+		for _, key := range []string{"models", "items", "list", "data", "result"} {
+			if nested, ok := v[key]; ok {
+				if out, err := parseGlobalModelValue(nested); err == nil && len(out) > 0 {
+					return out, nil
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
+func parseGlobalModelObject(obj map[string]any) (ModelInfo, bool) {
+	str := func(key string) string { s, _ := obj[key].(string); return strings.TrimSpace(s) }
+	id := str("id")
+	if id == "" { id = str("modelId") }
+	if id == "" { id = str("model") }
+	if id == "" { id = str("name") }
+	if id == "" { return ModelInfo{}, false }
+	if disabled, ok := obj["disabled"].(bool); ok && disabled { return ModelInfo{}, false }
+	int64Value := func(key string) int64 {
+		if n, ok := obj[key].(float64); ok { return int64(n) }
+		return 0
+	}
+	mi := ModelInfo{ID: id, Name: str("name"), ContextWindow: int64Value("maxInputTokens"), MaxTokens: int64Value("maxOutputTokens"), MaxAllowedSize: int64Value("maxAllowedSize")}
+	if mi.ContextWindow == 0 { mi.ContextWindow = int64Value("contextWindow") }
+	if mi.MaxTokens == 0 { mi.MaxTokens = int64Value("maxTokens") }
+	mi.SupportsReasoning, _ = obj["supportsReasoning"].(bool)
+	mi.SupportsImages, _ = obj["supportsImages"].(bool)
+
+	// reasoning 档位（思考档位选择依赖它）：与 CN 目录同款字段，
+	// defaultEffort 新键优先、effort 老键兜底，supportedEfforts 是可选档位集合。
+	if r, ok := obj["reasoning"].(map[string]any); ok {
+		reasonStr := func(key string) string {
+			s, _ := r[key].(string)
+			return strings.TrimSpace(s)
+		}
+		mi.DefaultEffort = reasonStr("defaultEffort")
+		if mi.DefaultEffort == "" {
+			mi.DefaultEffort = reasonStr("effort")
+		}
+		mi.CanDisableThinking, _ = r["canDisableThinking"].(bool)
+		if arr, ok := r["supportedEfforts"].([]any); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok {
+					if s = strings.TrimSpace(s); s != "" {
+						mi.Efforts = append(mi.Efforts, s)
+					}
+				}
+			}
+		}
+	}
+	// Credits 故意留空：PLAN §3.D2，倍率不进入 global 路径。
+	return mi, true
 }

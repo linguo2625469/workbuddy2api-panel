@@ -423,8 +423,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
-	// 裸名 → ("cn", 原串)，CN 现状零回归。
+	// 裸名默认仍是 CN；但当当前网关只有国际版账号时自动按 global 路由，
+	// 兼容旧前端/客户端仍填写 deepseek-v4.1-flash 的情况。模型列表仍显示完整的
+	// global:deepseek-v4.1-flash，推荐调用方使用带前缀值。
 	realm, bareModel := resolveModel(peek.Model)
+	if realm == "cn" && !strings.Contains(peek.Model, ":") && h.cfg.GlobalEnabled &&
+		len(h.cfg.Pool.AvailableUIDsForRealm("cn")) == 0 &&
+		len(h.cfg.Pool.AvailableUIDsForRealm("global")) > 0 {
+		realm = "global"
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)

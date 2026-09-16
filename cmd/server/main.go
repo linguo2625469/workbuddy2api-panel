@@ -30,7 +30,31 @@ import (
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.9.2-panel"
+const appVersion = "1.9.3-panel"
+
+// runtimeLogFile 落盘日志句柄（双击启动时唯一可见的日志出口）。nil = 未能创建，
+// 此时回落到 os.Stderr（有控制台的部署形态）。
+var runtimeLogFile *os.File
+
+// serverLogWriter 组合「持久日志 + 附加出口（面板环形缓冲）」。基础出口按
+// runtimeLogFile 是否可用自动回落 stderr，保证任何形态下都不丢日志。
+func serverLogWriter(extra ...io.Writer) io.Writer {
+	base := io.Writer(os.Stderr)
+	if runtimeLogFile != nil {
+		base = runtimeLogFile
+	}
+	return io.MultiWriter(append([]io.Writer{base}, extra...)...)
+}
+
+// chatLogWriter 同 serverLogWriter，但基础出口回落 os.Stdout
+// （保持「chat 表格日志走 stdout、标准日志走 stderr」的既有分流语义）。
+func chatLogWriter(extra ...io.Writer) io.Writer {
+	base := io.Writer(os.Stdout)
+	if runtimeLogFile != nil {
+		base = runtimeLogFile
+	}
+	return io.MultiWriter(append([]io.Writer{base}, extra...)...)
+}
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -47,7 +71,27 @@ func stateSibling(stateFile, name string) string {
 }
 
 func main() {
-	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
+	// 双击 exe 时工作目录可能不是 exe 所在目录（快捷方式、资源管理器或其他启动器均可能改变 cwd）。
+	// 所有相对路径必须固定到 exe 目录，保证 config.json/auths/data 可读写。
+	if exe, err := os.Executable(); err == nil {
+		if dir := filepath.Dir(exe); dir != "" {
+			_ = os.Chdir(dir)
+		}
+	}
+	// windowsgui 构建没有控制台，日志必须落文件，否则用户「双击没反应」时无从排查。
+	// 注意：后面装配面板时会再次 SetOutput（追加面板环形缓冲），所以这里保存的文件句柄
+	// 要作为基础出口复用（serverLogWriter/chatLogWriter），否则会被覆盖丢失。
+	if f, err := os.OpenFile("runtime.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+		runtimeLogFile = f
+		defer f.Close()
+		log.SetOutput(serverLogWriter())
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			fatal(fmt.Errorf("panic: %v", r))
+		}
+	}()
+	cfgPath := flag.String("config", "config.json", "配置文件路径（默认 exe 所在目录 config.json；不存在时自动生成推荐配置）")
 	flag.Parse()
 
 	cfg, err := Load(*cfgPath)
@@ -67,13 +111,13 @@ func main() {
 			}
 		}
 		if err != nil {
-			log.Fatalf("load config: %v", err)
+			fatal(fmt.Errorf("load config: %w", err))
 		}
 	}
 
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
-		log.Fatalf("load auths: %v", err)
+		fatal(fmt.Errorf("load auths: %w", err))
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
 
@@ -242,8 +286,8 @@ func main() {
 			return saveConfig(raw, *cfgPath, live, p, up, sch, chatHandler)
 		},
 	})
-	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
-	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
+	log.SetOutput(serverLogWriter(pn.Logs()))
+	server.SetChatLogOutput(chatLogWriter(pn.Logs()))
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,
@@ -289,11 +333,40 @@ func main() {
 		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("http: %v", err)
+	panelURL := fmt.Sprintf("http://127.0.0.1%s/panel/", panelListenPath(cfg.Listen))
+	setPanelURL(panelURL)
+	log.Printf("workbuddy2api starting (api_key=%v), panel %s", cfg.APIKey != "", panelURL)
+
+	// serveApplication 内部完成端口绑定（重复启动在此被拦下）、窗口创建与服务监听。
+	// ErrServerClosed = 用户关闭窗口的正常退出路径；errAlreadyRunning = 重复双击。
+	if err := serveApplication(srv); err != nil && err != http.ErrServerClosed {
+		if errors.Is(err, errAlreadyRunning) {
+			log.Printf("已有实例在运行，已激活其窗口，本次启动退出")
+			return
+		}
+		log.Printf("服务已停止：%v", err)
+		writeStartupError(err)
+		showErrorDialog(err.Error())
+		return
 	}
 	log.Printf("bye")
+}
+
+// fatal 记录错误、写 startup-error.txt 并弹出原生错误框后退出。
+// windowsgui 构建下没有任何控制台，静默退出会让用户以为「双击没反应」。
+func fatal(err error) {
+	log.Printf("fatal: %v", err)
+	writeStartupError(err)
+	showErrorDialog(err.Error())
+	os.Exit(1)
+}
+
+// writeStartupError 把启动失败原因同时写进 runtime.log 与 startup-error.txt。
+// 写文件是兜底：错误框可能被用户点掉，文件留着可供排查。
+func writeStartupError(err error) {
+	msg := fmt.Sprintf("WorkBuddy2API 启动失败：%v", err)
+	log.Printf("%s", msg)
+	_ = os.WriteFile("startup-error.txt", []byte(msg+"\n"), 0644)
 }
 
 // panelListenPath 从 listen 地址提取 ":port" 形式，用于启动日志拼面板 URL
