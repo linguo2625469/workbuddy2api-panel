@@ -274,37 +274,7 @@ func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0, len(staticModels)+len(globalModels))
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
 		for _, mi := range infos {
-			entry := map[string]any{
-				"id":                "cn:" + mi.ID,
-				"object":            "model",
-				"created":           1753600000,
-				"owned_by":          "workbuddy",
-				"context_length":    mi.ContextWindow,
-				"max_output_tokens": mi.MaxTokens,
-			}
-			if mi.ContextWindow == 0 {
-				entry["context_length"] = 131072 // 兜底
-			}
-			if len(mi.Efforts) > 0 {
-				entry["supported_efforts"] = mi.Efforts
-			}
-			if mi.DefaultEffort != "" {
-				entry["default_effort"] = mi.DefaultEffort
-			}
-			if mi.MaxAllowedSize > 0 {
-				entry["max_allowed_size"] = mi.MaxAllowedSize
-			}
-			if mi.SupportsReasoning {
-				entry["supports_reasoning"] = mi.SupportsReasoning
-				entry["can_disable_thinking"] = mi.CanDisableThinking
-			}
-			if mi.SupportsImages {
-				entry["supports_images"] = true // P1：多模态能力透出
-			}
-			if mi.Credits != "" {
-				entry["credits"] = mi.Credits
-			}
-			out = append(out, entry)
+			out = append(out, modelEntry("cn:", mi))
 		}
 	} else {
 		for _, m := range staticModels {
@@ -318,29 +288,75 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, e)
 		}
 	}
-	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。名单 = 探测结果
-	// ∪ 静态兜底（fetchGlobalModels 内合并去重）；无 global 账号时直接静态名单且零上游调用。
+	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。条目 = 探测结果
+	// ∪ 静态兜底（fetchGlobalModelInfos 内合并去重）；无 global 账号时直接静态名单且零上游调用。
+	// 2026-09-16 修复：历史上本分支只写 id/object/created/owned_by，漏掉 context_length 等
+	// 全部元数据 → 客户端拿不到窗口、回退自身小默认值 → 提前触发上下文压缩。
+	// 现与 CN 分支共用 modelEntry，字段集合不再漂移。
 	if h.cfg.GlobalEnabled {
-		for _, id := range h.fetchGlobalModels() {
-			out = append(out, map[string]any{
-				"id":       "global:" + id,
-				"object":   "model",
-				"created":  1753600000,
-				"owned_by": "workbuddy",
-			})
+		for _, mi := range h.fetchGlobalModelInfos() {
+			out = append(out, modelEntry("global:", mi))
 		}
 	}
 	return out
 }
 
-// fetchGlobalModels 拉 global realm 模型名目录（探测 ∪ 静态名单，1h 缓存 + 5min 负缓存）。
-// GlobalEnabled=false 时 modelList 已不进入本分支（逃生门在调用方 gate）。
-func (h *Handler) fetchGlobalModels() []string {
+// modelEntry 把上游 ModelInfo 包装成 OpenAI /v1/models 条目（CN 与 global 共用）。
+//
+// 共用同一函数是刻意的：两侧字段集合必须一致，否则一方新增能力（如窗口）时另一方会静默缺失
+// —— global 分支漏 context_length 正是这么来的。任何字段增删都只在此处发生。
+// context_length 恒有值（==0 时兜底 131072）：客户端以此决定何时压缩上下文，
+// 缺字段比填一个保守值危险得多。
+func modelEntry(prefix string, mi upstream.ModelInfo) map[string]any {
+	entry := map[string]any{
+		"id":             prefix + mi.ID,
+		"object":         "model",
+		"created":        1753600000,
+		"owned_by":       "workbuddy",
+		"context_length": mi.ContextWindow,
+	}
+	if mi.ContextWindow == 0 {
+		entry["context_length"] = 131072 // 兜底
+	}
+	if mi.MaxTokens > 0 {
+		entry["max_output_tokens"] = mi.MaxTokens
+	}
+	if len(mi.Efforts) > 0 {
+		entry["supported_efforts"] = mi.Efforts
+	}
+	if mi.DefaultEffort != "" {
+		entry["default_effort"] = mi.DefaultEffort
+	}
+	if mi.MaxAllowedSize > 0 {
+		entry["max_allowed_size"] = mi.MaxAllowedSize
+	}
+	if mi.SupportsReasoning {
+		entry["supports_reasoning"] = mi.SupportsReasoning
+		entry["can_disable_thinking"] = mi.CanDisableThinking
+	}
+	if mi.SupportsImages {
+		entry["supports_images"] = true // P1：多模态能力透出
+	}
+	if mi.Credits != "" {
+		entry["credits"] = mi.Credits
+	}
+	return entry
+}
+
+// fetchGlobalModelInfos 拉 global realm 模型目录（探测 ∪ 静态名单，1h 缓存 + 5min 负缓存），
+// 返回带窗口 / 能力元数据的条目。GlobalEnabled=false 时 modelList 已不进入本分支
+// （逃生门在调用方 gate）。
+func (h *Handler) fetchGlobalModelInfos() []upstream.ModelInfo {
 	acct := h.cfg.Pool.PickExcludingForRealm(nil, "", "global")
 	if acct == nil {
-		return globalModels // 无 global 账号：直接静态名单，零上游调用
+		// 无 global 账号：输出静态名单（仅 ID，元数据留空），零上游调用。
+		out := make([]upstream.ModelInfo, 0, len(globalModels))
+		for _, id := range globalModels {
+			out = append(out, upstream.ModelInfo{ID: id})
+		}
+		return out
 	}
-	return h.cfg.Upstream.FetchGlobalModels(acct)
+	return h.cfg.Upstream.FetchGlobalModelInfos(acct)
 }
 
 // fetchDynamicModels 从池中任一健康账号拉模型列表（含 contextWindow/maxTokens），缓存 1h。
