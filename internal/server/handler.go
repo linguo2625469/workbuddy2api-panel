@@ -406,38 +406,21 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 // 拉取失败记录时间戳进入 5min 负缓存，冷却期内直接返回 nil（纯动态，无静态表兜底），
 // 避免反复打上游。只从 CN realm 账号拉取（global 走独立探测）。
 func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
-	dynamicModelsCache.RLock()
-	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
-		out := dynamicModelsCache.ids
-		dynamicModelsCache.RUnlock()
-		return out
-	}
-	// 失败负缓存：冷却期内不再请求上游。
-	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
-		dynamicModelsCache.RUnlock()
+	// 与 /panel/api/models 使用完全相同的账号选择口径：取当前第一个可用 CN
+	// 账号，而不是 Pool.Pick() 的加权/粘性选号。这样面板与公开 /v1/models
+	// 不会因为选中了不同 realm/账号而返回两套模型目录。
+	uids := h.cfg.Pool.AvailableUIDsForRealm("cn")
+	if len(uids) == 0 {
 		return nil
 	}
-	dynamicModelsCache.RUnlock()
-
-	acct := h.cfg.Pool.Pick()
+	acct := h.cfg.Pool.AuthByUID(uids[0])
 	if acct == nil {
 		return nil
 	}
 	infos, err := h.cfg.Upstream.FetchModels(acct)
 	if err != nil || len(infos) == 0 {
-		// 拉取失败只进负缓存（5min lastFail），不 NoteError：NoteError 喂的是 chat
-		// 熔断器，models 端点偶发 5xx 跨界惩罚 chat 通道健康的账号；
-		// models 拉取失败 ≠ 账号 chat 不可用。
-		dynamicModelsCache.Lock()
-		dynamicModelsCache.lastFail = time.Now()
-		dynamicModelsCache.Unlock()
 		return nil
 	}
-	dynamicModelsCache.Lock()
-	dynamicModelsCache.ids = infos
-	dynamicModelsCache.fetched = time.Now()
-	dynamicModelsCache.lastFail = time.Time{} // 成功则清空负缓存
-	dynamicModelsCache.Unlock()
 	return infos
 }
 
