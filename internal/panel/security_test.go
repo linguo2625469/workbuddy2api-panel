@@ -17,9 +17,9 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	p := newTestPanel()
 	paths := []struct{ method, path string }{
 		{"GET", "/panel/"},
-		{"GET", "/panel/app.js"},
-		{"GET", "/panel/api/overview"}, // 401（未提供 key）
-		{"POST", "/panel/api/config"},  // 401
+		{"GET", "/panel/assets/index.js"}, // 不存在也走同一 handler（FileServer 前已写头）
+		{"GET", "/panel/api/overview"},    // 401（未提供 key）
+		{"POST", "/panel/api/config"},     // 401
 		{"GET", "/panel/api/nonexistent"},
 	}
 	for _, c := range paths {
@@ -70,8 +70,8 @@ func TestIndexReferencesExternalScript(t *testing.T) {
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `<script src="app.js"></script>`) {
-		t.Error("index.html must load app.js externally (inline script is blocked by CSP)")
+	if !strings.Contains(body, `/panel/assets/`) || !strings.Contains(body, ".js") {
+		t.Error("index.html must load the vite bundle externally (inline script is blocked by CSP)")
 	}
 	// 反例保护：出现内联 <script>...</script> 内容块即为回归
 	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
@@ -79,19 +79,45 @@ func TestIndexReferencesExternalScript(t *testing.T) {
 	}
 }
 
-// app.js 必须能作为同源脚本取到且类型正确（否则页面白屏）。
-func TestAppScriptServed(t *testing.T) {
+// 构建产物必须能作为同源脚本取到且类型正确（否则页面白屏）。
+// bundle 文件名带 hash：从页面里解析出真实 URL 再回放（端到端接线校验）。
+func TestPanelAssetsServed(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.js", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d want 200", rec.Code)
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+	idx := strings.Index(body, "/panel/assets/")
+	if idx < 0 {
+		t.Fatal("index.html 未引用 /panel/assets/ 构建产物")
 	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+	end := strings.Index(body[idx:], `"`)
+	if end < 0 {
+		t.Fatal("无法解析产物 URL")
+	}
+	asset := body[idx : idx+end]
+	if !strings.HasSuffix(asset, ".js") {
+		// 首个命中可能是 css；找下一个 js
+		rest := body[idx+end:]
+		idx2 := strings.Index(rest, "/panel/assets/")
+		if idx2 < 0 {
+			t.Fatal("index.html 未引用 js 产物")
+		}
+		end2 := strings.Index(rest[idx2:], `"`)
+		if end2 < 0 {
+			t.Fatal("无法解析 js 产物 URL")
+		}
+		asset = rest[idx2 : idx2+end2]
+	}
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, httptest.NewRequest("GET", asset, nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("GET %s code=%d want 200", asset, rec2.Code)
+	}
+	if ct := rec2.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
 		t.Errorf("Content-Type=%q want javascript", ct)
 	}
-	if !strings.Contains(rec.Body.String(), "'use strict'") {
-		t.Error("app.js body looks wrong")
+	if rec2.Body.Len() == 0 {
+		t.Error("bundle body 为空")
 	}
 }
 

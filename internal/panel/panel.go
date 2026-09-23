@@ -3,7 +3,8 @@
 // 签到/保活，以及运行日志环形缓冲（镜像 log 包与 chat 表格日志）。
 //
 // 设计约束：
-//   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
+//   - 前端是 Svelte + Tailwind + Vite 工程（internal/panel/frontend），构建产物
+//     （internal/panel/dist）经 go:embed 与二进制同体部署，运行时零外部依赖；
 //   - 鉴权复用网关 api_key（Bearer），与 /v1/* 同一口径；api_key 为空 = 不鉴权
 //     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /panel/api/*；
 //   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
@@ -144,7 +145,7 @@ func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
-	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	p.mux.HandleFunc("GET /panel/assets/", p.assets)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))

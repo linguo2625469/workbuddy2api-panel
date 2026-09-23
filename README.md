@@ -198,7 +198,7 @@ flowchart LR
 ### 环境要求
 
 - **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
-- **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
+- **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows / macOS 单文件运行」）
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
 - 宿主机 Go ≥ 1.22（仅从源码构建时需要）
 
@@ -206,7 +206,7 @@ flowchart LR
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+git clone https://github.com/openalger/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
@@ -231,20 +231,39 @@ docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
 
-### 方式二：Windows 单文件运行（无需 Docker）
+### 方式二：Windows / macOS 单文件运行（无需 Docker）
+
+> **Release 预编译包**：打 tag 自动构建（见 `.github/workflows/release.yml`），在 GitHub Release 页按平台下载：
+> `wb2api-<版本>-windows-amd64.zip` / `windows-arm64.zip` / `darwin-amd64.tar.gz`（Intel Mac）/
+> `darwin-arm64.tar.gz`（M1/M2/M3/M4）/`linux-amd64.tar.gz` / `linux-arm64.tar.gz`，
+> 包内含二进制 + `config.example.json`。发版命令：`git tag v1.11.2 && git push origin v1.11.2`。
 
 ```powershell
-# 1) 下载 Release 中的 wb2api.exe，或从源码构建
+# Windows：下载 Release 中的 wb2api.exe，或从源码构建
 go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 
-# 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
+# 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
 .\wb2api.exe -config config.json
 
-# 3) 浏览器打开面板添加账号
-#    http://127.0.0.1:7863/panel/
+# 浏览器打开面板添加账号
+# http://127.0.0.1:7863/panel/
 ```
 
-exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
+```bash
+# macOS：下载对应架构的 tar.gz（Intel 选 amd64，M 系列选 arm64），或从源码构建
+tar -xzf wb2api-v1.11.1-darwin-arm64.tar.gz && cd wb2api-v1.11.1-darwin-arm64
+# GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+
+# 首次运行需去隔离属性（未签名二进制会被 Gatekeeper 拦截），之后直接运行
+xattr -d com.apple.quarantine ./wb2api
+chmod +x ./wb2api
+./wb2api -config config.json
+# 不存在 config.json 时自动生成推荐配置；浏览器打开 http://127.0.0.1:7863/panel/ 添加账号
+```
+
+单文件二进制**自包含**（前端资源已 embed 进二进制，`login.sh` 的 bash 流程在 macOS 原生可用，
+Windows 请用面板「添加账号」或 WSL）：拷到任意同平台机器即可运行，
+只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
 
 ### 方式三：源码运行（开发调试）
 
@@ -492,7 +511,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ## 🖥️ Web 管理面板
 
-内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：
+内嵌式管理面板（`internal/panel`：Svelte + Tailwind + Vite 工程在 `internal/panel/frontend`，构建产物 `internal/panel/dist` 经 go:embed 打进二进制，运行时零外部依赖），服务启动后访问：
 
 ```
 http://127.0.0.1:7863/panel/
@@ -520,7 +539,7 @@ http://127.0.0.1:7863/panel/
 
 面板后端接口挂在 `/panel/api/*`（同一 Bearer 鉴权），可脚本化调用；账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
 
-**安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
+**安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端产物只有同源外链脚本/样式，不含内联脚本与内联事件处理器。前端改动后在 `internal/panel/frontend` 执行 `npm install && npm run build` 再构建 Go 二进制（Docker 镜像内自动完成）。用量视图为窗口口径：卡片/图表/三表均按所选时间窗聚合，累计值只做次级对照。
 
 **鉴权实现**：`internal/httpauth` 统一 server 与 panel 的 Bearer 校验，使用 SHA-256 摘要 + `subtle.ConstantTimeCompare` 常量时间比较（避免逐字节比较泄露密钥信息）；上游返回的 `uid` 经白名单校验（`[A-Za-z0-9_-]`，长度 ≤64）后才用于拼凭证文件名，防止路径穿越。
 

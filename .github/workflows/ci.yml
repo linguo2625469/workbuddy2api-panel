@@ -1,0 +1,64 @@
+name: CI
+
+# push / PR 时做跨平台校验：后端在 ubuntu + windows + macOS 跑 vet/test，
+# 前端单独验证 vite 构建（产物经 go:embed 进二进制，构建失败必须拦下）。
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+
+jobs:
+  backend:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: Vet
+        shell: bash
+        run: go vet ./...
+
+      - name: Test
+        shell: bash
+        run: go test ./...
+
+      - name: Build smoke (native arch)
+        shell: bash
+        run: CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api-smoke ./cmd/server
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: internal/panel/frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: internal/panel/frontend/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        run: npm run build

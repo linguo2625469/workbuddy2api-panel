@@ -20,6 +20,10 @@ config.json
 *.tmp
 __pycache__/
 
+# 前端构建（node_modules 不进库；dist 构建产物提交进库，保证 go build 开箱即用）
+internal/panel/frontend/node_modules/
+npm-debug.log*
+
 # Backups (contains auth tokens)
 backups/
 
@@ -40,7 +44,14 @@ docs/
 /login.exe
 /credit.exe
 
+# Release / 本地交叉编译产物（GitHub Actions 自动打包，见 .github/workflows/release.yml）
+/wb2api-*
+/wb2api-smoke
+/wb2api-smoke.exe
+/dist-release/
+
 # 本地验证工具（判据逆向过程脚本，结论沉淀于 data/desktop-task-protocol.md）
 /cmd/desktopverify*/
 *.zip
+*.tar.gz
 server.exe

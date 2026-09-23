@@ -368,6 +368,15 @@ type Point struct {
 }
 
 // Snapshot 面板一次拉取的全部用量视图数据。
+//
+// 口径说明（前端混乱的根因，写死在这里）：
+//   - Totals / ByRealm / ByAccount / ByModel / Series 是**累计全历史**，
+//     hours 只控制 Series 里小时点的数量（其余折成日点），不控制总量。
+//     直接拿 Totals 当"窗口内合计"会导致切窗口时数字不动。
+//   - TotalsWindow / SeriesWindow 才是**窗口内口径**：只有时间戳落在
+//     [WindowFrom, 生成时刻] 内的桶才参与。前端 KPI 与图表必须用这组，
+//     累计值只做次级对照。hours>168（7 天以上）时 SeriesWindow 自动转日粒度，
+//     避免 720 根小时柱挤成牙签。
 type Snapshot struct {
 	Totals    Agg        `json:"totals"`
 	ByRealm   []KeyedAgg `json:"by_realm"`
@@ -378,6 +387,17 @@ type Snapshot struct {
 	FileBytes int64      `json:"file_bytes"`
 	Since     string     `json:"since,omitempty"`
 	Generated string     `json:"generated"`
+
+	TotalsWindow Agg     `json:"totals_window"`
+	WindowHours  int     `json:"window_hours"`
+	WindowFrom   string  `json:"window_from"`
+	SeriesWindow []Point `json:"series_window"`
+
+	// 窗口内按维度拆分（与 SeriesWindow 同一过滤集，前端三表用这组排序；
+	// 累计版 ByAccount/ByModel/ByRealm 只做"自启用起"的次级对照）。
+	ByAccountWindow []KeyedAgg `json:"by_account_window"`
+	ByModelWindow   []KeyedAgg `json:"by_model_window"`
+	ByRealmWindow   []KeyedAgg `json:"by_realm_window"`
 }
 
 // Snapshot 聚合**所选窗口内**的桶，产出面板一次拉取的全部用量视图数据。
@@ -415,8 +435,8 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	daySeries := map[string]*aggAcc{}
 
 	var hourFrom time.Time
+	nowHour := time.Now().Truncate(time.Hour)
 	if windowed {
-		nowHour := time.Now().Truncate(time.Hour)
 		hourFrom = nowHour.Add(-time.Duration(hours-1) * time.Hour)
 	}
 
@@ -495,6 +515,7 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	}
 
 	// 日点（升序）+ 小时点（升序）拼成一条连续时序。
+	// （遗留口径：为兼容旧前端与旧测试保留全历史混合轴；新前端用 SeriesWindow。）
 	dayKeys := make([]string, 0, len(daySeries))
 	for k := range daySeries {
 		dayKeys = append(dayKeys, k)
@@ -510,6 +531,120 @@ func (r *Recorder) Snapshot(hours int, nicks map[string]string) Snapshot {
 	sort.Strings(hourKeys)
 	for _, k := range hourKeys {
 		snap.Series = append(snap.Series, Point{T: k, Scope: "hour", Agg: hourSeries[k].finish()})
+	}
+
+	// 窗口内口径：只收 [hourFrom, nowHour+1h) 区间有重叠的桶。
+	// hours>168 时转日粒度（30 天窗口画 30 根日柱而不是 720 根小时柱）。
+	snap.WindowHours = hours
+	snap.WindowFrom = hourFrom.Format(time.RFC3339)
+	var wTotal aggAcc
+	wRealm := map[string]*aggAcc{}
+	wAcct := map[string]*aggAcc{}
+	wAcctRealm := map[string]string{}
+	wModel := map[string]*aggAcc{}
+	addWindow := func(b *bucket) {
+		wTotal.add(b)
+		if wRealm[b.Realm] == nil {
+			wRealm[b.Realm] = &aggAcc{}
+		}
+		wRealm[b.Realm].add(b)
+		if wAcct[b.UID] == nil {
+			wAcct[b.UID] = &aggAcc{}
+		}
+		wAcct[b.UID].add(b)
+		if wAcctRealm[b.UID] == "" {
+			wAcctRealm[b.UID] = b.Realm
+		}
+		if wModel[b.Model] == nil {
+			wModel[b.Model] = &aggAcc{}
+		}
+		wModel[b.Model].add(b)
+	}
+	daily := hours > 168
+	winHour := map[string]*aggAcc{}
+	winDay := map[string]*aggAcc{}
+	for i := range bs {
+		b := &bs[i]
+		if strings.HasPrefix(b.Scope, "h:") {
+			ts, err := time.ParseInLocation(hourLayout, strings.TrimPrefix(b.Scope, "h:"), time.Local)
+			if err != nil || ts.Before(hourFrom) {
+				continue
+			}
+			addWindow(b)
+			if daily {
+				d := ts.Format(dayLayout)
+				if winDay[d] == nil {
+					winDay[d] = &aggAcc{}
+				}
+				winDay[d].add(b)
+			} else {
+				k := strings.TrimPrefix(b.Scope, "h:")
+				if winHour[k] == nil {
+					winHour[k] = &aggAcc{}
+				}
+				winHour[k].add(b)
+			}
+		} else {
+			dayStr := strings.TrimPrefix(b.Scope, "d:")
+			ts, err := time.ParseInLocation(dayLayout, dayStr, time.Local)
+			if err != nil {
+				continue
+			}
+			// 日桶覆盖 [00:00, 次日00:00)，与窗口有重叠即收。
+			if ts.Add(24*time.Hour).After(hourFrom) && !ts.After(nowHour) {
+				addWindow(b)
+				if daily {
+					if winDay[dayStr] == nil {
+						winDay[dayStr] = &aggAcc{}
+					}
+					winDay[dayStr].add(b)
+				} else {
+					// 小窗口下日桶理论上不会命中（日桶都是 90 天前的折叠产物），
+					// 命中则按其 calendar 日并入小时轴的对应日展示位。
+					if winDay[dayStr] == nil {
+						winDay[dayStr] = &aggAcc{}
+					}
+					winDay[dayStr].add(b)
+				}
+			}
+		}
+	}
+	snap.TotalsWindow = wTotal.finish()
+	snap.ByRealmWindow = keyed(wRealm, func(k string) (string, string) { return k, "" })
+	snap.ByAccountWindow = keyed(wAcct, func(k string) (string, string) { return k, nicks[k] })
+	snap.ByModelWindow = keyed(wModel, func(k string) (string, string) { return k, "" })
+	for i := range snap.ByAccountWindow {
+		snap.ByAccountWindow[i].Realm = wAcctRealm[snap.ByAccountWindow[i].Key]
+	}
+	if daily {
+		dks := make([]string, 0, len(winDay))
+		for k := range winDay {
+			dks = append(dks, k)
+		}
+		sort.Strings(dks)
+		for _, k := range dks {
+			snap.SeriesWindow = append(snap.SeriesWindow, Point{T: k, Scope: "day", Agg: winDay[k].finish()})
+		}
+	} else {
+		hks := make([]string, 0, len(winHour))
+		for k := range winHour {
+			hks = append(hks, k)
+		}
+		sort.Strings(hks)
+		for _, k := range hks {
+			snap.SeriesWindow = append(snap.SeriesWindow, Point{T: k, Scope: "hour", Agg: winHour[k].finish()})
+		}
+		// 小窗口下若有命中的日桶（极罕见），追加到末尾供前端合并展示。
+		if len(winDay) > 0 {
+			dks := make([]string, 0, len(winDay))
+			for k := range winDay {
+				dks = append(dks, k)
+			}
+			sort.Strings(dks)
+			for _, k := range dks {
+				snap.SeriesWindow = append(snap.SeriesWindow, Point{T: k, Scope: "day", Agg: winDay[k].finish()})
+			}
+		}
 	}
 
 	if r.path != "" {

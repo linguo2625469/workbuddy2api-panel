@@ -1,0 +1,151 @@
+name: Release
+
+# 打 tag 即发版：git tag v1.11.2 && git push origin v1.11.2
+# 也可在 Actions 页手动触发（workflow_dispatch，用于验证打包流程，不发布 Release）。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（手动触发时写入二进制，如 v1.11.2-test）"
+        required: false
+        default: "dev"
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.23"
+  NODE_VERSION: "24"
+  APP_NAME: "wb2api"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: internal/panel/frontend/package-lock.json
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$GITHUB_OUTPUT"
+
+      - name: Build panel frontend (go:embed)
+        working-directory: internal/panel/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Vet
+        shell: bash
+        run: go vet ./...
+
+      - name: Test
+        shell: bash
+        run: go test ./...
+
+      - name: Cross-compile (windows / macOS / linux, amd64+arm64)
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release/bin
+          LDFLAGS="-s -w -X main.appVersion=${VERSION}"
+          build_one() {
+            local goos="$1" goarch="$2" ext="$3"
+            local out="${APP_NAME}-${goos}-${goarch}${ext}"
+            echo "==> ${goos}/${goarch} -> ${out} (version=${VERSION})"
+            CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+              go build -trimpath -ldflags="${LDFLAGS}" \
+              -o "dist-release/bin/${out}" ./cmd/server
+          }
+          # Windows（amd64 主力 + arm64 覆盖 Snapdragon / Win on ARM）
+          build_one windows amd64 ".exe"
+          build_one windows arm64 ".exe"
+          # macOS（amd64 覆盖 Intel Mac，arm64 覆盖 M1/M2/M3/M4）
+          build_one darwin amd64 ""
+          build_one darwin arm64 ""
+          # Linux（服务器 / 直跑场景，顺手产出）
+          build_one linux amd64 ""
+          build_one linux arm64 ""
+          ls -la dist-release/bin/
+
+      - name: Package (zip for windows, tar.gz for unix)
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-release/pkg
+          # 包内二进制统一为 wb2api(.exe)，附带开箱文件；包名带版本+平台
+          pack() {
+            local goos="$1" goarch="$2" src="$3" kind="$4"
+            local pkg="${APP_NAME}-${VERSION}-${goos}-${goarch}"
+            local stage="dist-release/stage-${goos}-${goarch}"
+            rm -rf "${stage}" && mkdir -p "${stage}/${pkg}"
+            if [[ "${goos}" == "windows" ]]; then
+              cp "dist-release/bin/${src}" "${stage}/${pkg}/${APP_NAME}.exe"
+            else
+              cp "dist-release/bin/${src}" "${stage}/${pkg}/${APP_NAME}"
+              chmod +x "${stage}/${pkg}/${APP_NAME}"
+            fi
+            cp config.example.json "${stage}/${pkg}/"
+            cp README.md "${stage}/${pkg}/" 2>/dev/null || true
+            cp LICENSE "${stage}/${pkg}/" 2>/dev/null || true
+            if [[ "${kind}" == "zip" ]]; then
+              (cd "${stage}" && zip -r -9 "../../pkg/${pkg}.zip" "${pkg}")
+            else
+              tar -czf "dist-release/pkg/${pkg}.tar.gz" -C "${stage}" "${pkg}"
+            fi
+            rm -rf "${stage}"
+          }
+          pack windows amd64 "${APP_NAME}-windows-amd64.exe" zip
+          pack windows arm64 "${APP_NAME}-windows-arm64.exe" zip
+          pack darwin amd64 "${APP_NAME}-darwin-amd64" tgz
+          pack darwin arm64 "${APP_NAME}-darwin-arm64" tgz
+          pack linux amd64 "${APP_NAME}-linux-amd64" tgz
+          pack linux arm64 "${APP_NAME}-linux-arm64" tgz
+          rm -rf dist-release/bin
+          (cd dist-release/pkg && sha256sum * > SHA256SUMS.txt)
+          ls -la dist-release/pkg/
+          cat dist-release/pkg/SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist-release/pkg/*
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        # 只有打 tag 触发时才真正发布；手动触发仅验证打包
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-release/pkg/*
+          generate_release_notes: true

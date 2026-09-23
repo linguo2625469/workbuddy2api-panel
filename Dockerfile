@@ -1,9 +1,19 @@
 # syntax=docker/dockerfile:1
+# 前端构建阶段：Svelte + Tailwind + Vite 产物（internal/panel/dist），供 Go embed。
+FROM node:24-alpine AS web
+WORKDIR /web
+COPY internal/panel/frontend/package*.json ./
+RUN npm ci --no-audit --no-fund
+COPY internal/panel/frontend/ ./
+RUN npm run build
+
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
+# 以刚构建的前端产物覆盖（仓库内提交的 dist 与之一致，此处保证镜像永远最新）
+COPY --from=web /web/dist ./internal/panel/dist
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \

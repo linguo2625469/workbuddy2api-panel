@@ -1,6 +1,8 @@
 auths/
 data/
 *.tmp
+internal/panel/frontend/node_modules/
+internal/panel/dist/
 .git/
 .gitignore
 docs/
