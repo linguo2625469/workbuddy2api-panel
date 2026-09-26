@@ -1738,8 +1738,10 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 					CycleCapacityUsed   int64  `json:"CycleCapacityUsed"`
 					CycleCapacitySize   int64  `json:"CycleCapacitySize"`
 					// 到期时间字段名在上游同时存在两种口径，都读，谁有值用谁。
-					ExpiredTime    string `json:"ExpiredTime"`
-					PackageEndTime string `json:"PackageEndTime"`
+					ExpiredTime      string `json:"ExpiredTime"`
+					PackageEndTime   string `json:"PackageEndTime"`
+					CycleEndTime     string `json:"CycleEndTime"`
+					DeductionEndTime int64  `json:"DeductionEndTime"`
 					// 发放时刻（epoch 毫秒）。
 					CreateTime     int64  `json:"CreateTime"`
 					PackageCode    string `json:"PackageCode"`
@@ -1762,7 +1764,11 @@ func (c *Client) CreditPackages(a *auth.Auth) ([]CreditPackage, int64, int64, er
 			SubProductCode: p.SubProductCode,
 			SubProductName: p.SubProductName,
 		}
-		if p.ExpiredTime != "" {
+		if p.DeductionEndTime > 0 {
+			cp.EndTime = time.UnixMilli(p.DeductionEndTime).Format("2006-01-02 15:04:05")
+		} else if p.CycleEndTime != "" {
+			cp.EndTime = p.CycleEndTime
+		} else if p.ExpiredTime != "" {
 			cp.EndTime = p.ExpiredTime
 		} else {
 			cp.EndTime = p.PackageEndTime
@@ -1837,6 +1843,9 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain,
 				Accounts []struct {
 					PackageName         string `json:"PackageName"`
 					CycleEndTime        string `json:"CycleEndTime"` // "2006-01-02 15:04:05"，缺省/空 = 无到期
+					DeductionEndTime    int64  `json:"DeductionEndTime"`
+					ExpiredTime         string `json:"ExpiredTime"`
+					PackageEndTime      string `json:"PackageEndTime"`
 					CapacitySize        int64  `json:"CapacitySize"`
 					CapacityRemain      int64  `json:"CapacityRemain"`
 					CapacityUsed        int64  `json:"CapacityUsed"`
@@ -1868,11 +1877,30 @@ func (c *Client) UserResourceDetailed(a *auth.Auth, soon time.Duration) (remain,
 		remain += r
 		total += size
 		// 分桶：仅 soon>0 且能解析出有效到期时间、且确实在窗口内 → expiring。
-		if soon > 0 && r > 0 && acct.CycleEndTime != "" {
-			if end, perr := time.ParseInLocation(packageEndLayout, acct.CycleEndTime, softRateResetLoc); perr == nil {
-				if !end.After(now.Add(soon)) {
-					expiring += r
+		if soon > 0 && r > 0 {
+			var endTime time.Time
+			var hasEnd bool
+			if acct.DeductionEndTime > 0 {
+				endTime = time.UnixMilli(acct.DeductionEndTime)
+				hasEnd = true
+			} else if acct.CycleEndTime != "" {
+				if end, perr := time.ParseInLocation(packageEndLayout, acct.CycleEndTime, softRateResetLoc); perr == nil {
+					endTime = end
+					hasEnd = true
 				}
+			} else if acct.ExpiredTime != "" {
+				if end, perr := time.ParseInLocation(packageEndLayout, acct.ExpiredTime, softRateResetLoc); perr == nil {
+					endTime = end
+					hasEnd = true
+				}
+			} else if acct.PackageEndTime != "" {
+				if end, perr := time.ParseInLocation(packageEndLayout, acct.PackageEndTime, softRateResetLoc); perr == nil {
+					endTime = end
+					hasEnd = true
+				}
+			}
+			if hasEnd && !endTime.After(now.Add(soon)) {
+				expiring += r
 			}
 		}
 	}

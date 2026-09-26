@@ -2,6 +2,7 @@
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY go.mod ./
+ENV GOPROXY=https://goproxy.cn,direct
 RUN go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。

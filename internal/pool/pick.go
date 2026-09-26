@@ -78,8 +78,12 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	// 抽签权重共享同一基准，两个阶段权重可比。
 	var maxCredits int64
 	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
+		c := e.creditsTotal
+		if c <= 0 {
+			c = e.credits
+		}
+		if c > maxCredits {
+			maxCredits = c
 		}
 	}
 	// 成本分层（reqModel 非空时）：按该模型的实测扣费把候选分层，只保留最优层。
@@ -300,8 +304,12 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	now := time.Now()
 	var maxCredits int64
 	for _, e := range cands {
-		if e.credits > maxCredits {
-			maxCredits = e.credits
+		c := e.creditsTotal
+		if c <= 0 {
+			c = e.credits
+		}
+		if c > maxCredits {
+			maxCredits = c
 		}
 	}
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
@@ -333,9 +341,13 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 // weightOf 计算单个账号的三因子权重。
 func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	w := 1.0
-	// 1. credits 比例 ×10（会计入 mid-credit 锚点，避免全员 0 时 credits 项为 0）。
+	// 1. credits 比例 ×10（改为按总积分，如无总积分退回剩余积分）
+	c := e.creditsTotal
+	if c <= 0 {
+		c = e.credits
+	}
 	if maxCredits > 0 {
-		w += float64(e.credits) / float64(maxCredits) * 10
+		w += float64(c) / float64(maxCredits) * 10
 	}
 	// 1b. 快过期积分加成：官方活动赠送的奖励积分按批过期，不用就作废。
 	// creditsExpiring 占总量比例越高，越应优先被消耗——把"快过期占比"作为独立的

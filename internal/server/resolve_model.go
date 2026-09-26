@@ -11,6 +11,12 @@ import "strings"
 //
 // 导出为 ResolveModel（cmd/server/main.go 粘性闭包需要），包内简写 resolveModel。
 func resolveModel(model string) (realm, bare string) {
+	if strings.HasSuffix(model, "-cn") {
+		return "cn", strings.TrimSuffix(model, "-cn")
+	}
+	if strings.HasSuffix(model, "-global") {
+		return "global", strings.TrimSuffix(model, "-global")
+	}
 	idx := strings.IndexByte(model, ':')
 	if idx < 0 {
 		return "cn", model

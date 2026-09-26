@@ -321,7 +321,7 @@ func (h *Handler) modelList() []map[string]any {
 	out := make([]map[string]any, 0)
 	for _, mi := range h.fetchDynamicModels() {
 		entry := map[string]any{
-			"id":       "cn:" + mi.ID,
+			"id":       mi.ID + "-cn",
 			"object":   "model",
 			"created":  1753600000,
 			"owned_by": "workbuddy",
@@ -364,7 +364,7 @@ func (h *Handler) modelList() []map[string]any {
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
 		for _, id := range globalIDs {
 			entry := map[string]any{
-				"id":       "global:" + id,
+				"id":       id + "-global",
 				"object":   "model",
 				"created":  1753600000,
 				"owned_by": "workbuddy",
