@@ -9,7 +9,10 @@ scripts/__pycache__/
 /login
 /credit
 /wb2api
+/wb2api.exe
+/wb2api-tray.exe
 /signin_bin
+/.startup-notice-disabled
 # 真实配置不进镜像（镜像默认用 config.example.json，生产以挂载卷覆盖）
 config.json
 PLAN.md

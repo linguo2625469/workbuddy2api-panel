@@ -36,6 +36,7 @@ jobs:
           go-version-file: go.mod
       # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
       - run: go test ./...
+      - run: go test -tags tray ./...
 
   build:
     needs: test
@@ -44,11 +45,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goos: windows, goarch: amd64, ext: .zip, gui: "-H=windowsgui" }
-          - { goos: linux, goarch: amd64, ext: .tar.gz, gui: "" }
-          - { goos: linux, goarch: arm64, ext: .tar.gz, gui: "" }
-          - { goos: darwin, goarch: amd64, ext: .tar.gz, gui: "" }
-          - { goos: darwin, goarch: arm64, ext: .tar.gz, gui: "" }
+          - { goos: windows, goarch: amd64, ext: .zip }
+          - { goos: linux, goarch: amd64, ext: .tar.gz }
+          - { goos: linux, goarch: arm64, ext: .tar.gz }
+          - { goos: darwin, goarch: amd64, ext: .tar.gz }
+          - { goos: darwin, goarch: arm64, ext: .tar.gz }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -64,7 +65,15 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
-        run: go build -ldflags "-s -w ${{ matrix.gui }}" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
+        run: go build -ldflags "-s -w" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
+
+      - name: 构建 Windows GUI 托盘版
+        if: matrix.goos == 'windows'
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: go build -tags tray -ldflags "-s -w -H=windowsgui" -o wb2api-tray.exe ./cmd/server
 
       # 版本串断言：二进制必须含源码 appVersion（防交叉编译矩阵里编错树/漏 ldflags）
       - name: 断言二进制版本串
@@ -74,21 +83,26 @@ jobs:
             echo "::error::binary missing version string ${{ steps.ver.outputs.v }}"
             exit 1
           fi
+          if [ "${{ matrix.goos }}" = "windows" ] && ! grep -qa "${{ steps.ver.outputs.v }}" wb2api-tray.exe; then
+            echo "::error::tray binary missing version string ${{ steps.ver.outputs.v }}"
+            exit 1
+          fi
           echo "version assert OK: ${{ steps.ver.outputs.v }}"
 
-      - name: 断言 Windows GUI 子系统
+      - name: 断言 Windows 子系统
         if: matrix.goos == 'windows'
         run: |
-          python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); o=struct.unpack_from("<I",d,0x3c)[0]; s=struct.unpack_from("<H",d,o+0x5c)[0]; print("subsystem",s); raise SystemExit(0 if s==2 else 1)' wb2api.exe
+          python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); o=struct.unpack_from("<I",d,0x3c)[0]; s=struct.unpack_from("<H",d,o+0x5c)[0]; print(sys.argv[1],"subsystem",s); raise SystemExit(0 if s==int(sys.argv[2]) else 1)' wb2api.exe 3
+          python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); o=struct.unpack_from("<I",d,0x3c)[0]; s=struct.unpack_from("<H",d,o+0x5c)[0]; print(sys.argv[1],"subsystem",s); raise SystemExit(0 if s==int(sys.argv[2]) else 1)' wb2api-tray.exe 2
 
-      - name: 打包（windows=zip 三件套，其余=tar.gz）
+      - name: 打包（windows=zip 四件套，其余=tar.gz）
         run: |
           V="${{ steps.ver.outputs.v }}"
           V="${V%-panel}"   # 文件名不带 -panel 后缀（wb2api-panel-v1.2.3-... 既有惯例）
           case "${{ matrix.goos }}" in
             windows)
               NAME="wb2api-panel-v${V}-windows-amd64.zip"
-              zip -q "$NAME" wb2api.exe config.example.json README.md
+              zip -q "$NAME" wb2api.exe wb2api-tray.exe config.example.json README.md
               ;;
             *)
               NAME="wb2api-panel-v${V}-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"

@@ -1,4 +1,4 @@
-//go:build windows
+//go:build windows && tray
 
 package main
 
@@ -49,6 +49,7 @@ func runDesktop(ctx context.Context, onOpen func()) error {
 
 		ready.Store(true)
 		close(readyCh)
+		showStartupNotice()
 	}, func() {})
 
 	close(doneCh)

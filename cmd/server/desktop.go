@@ -13,7 +13,8 @@ import (
 )
 
 // logSinks keeps the platform console streams separate from the optional
-// Windows daily file sink. Non-Windows builds retain their current output.
+// Windows tray build's daily file sink. Console/default builds retain the
+// upstream output behavior.
 type logSinks struct {
 	system io.Writer
 	chat   io.Writer
@@ -25,7 +26,7 @@ func newLogSinks() (*logSinks, error) {
 		system: os.Stderr,
 		chat:   os.Stdout,
 	}
-	if runtime.GOOS != "windows" {
+	if !trayBuild || runtime.GOOS != "windows" {
 		return s, nil
 	}
 
