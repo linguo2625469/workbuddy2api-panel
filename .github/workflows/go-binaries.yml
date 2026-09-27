@@ -44,11 +44,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { goos: windows, goarch: amd64, ext: .zip }
-          - { goos: linux, goarch: amd64, ext: .tar.gz }
-          - { goos: linux, goarch: arm64, ext: .tar.gz }
-          - { goos: darwin, goarch: amd64, ext: .tar.gz }
-          - { goos: darwin, goarch: arm64, ext: .tar.gz }
+          - { goos: windows, goarch: amd64, ext: .zip, gui: "-H=windowsgui" }
+          - { goos: linux, goarch: amd64, ext: .tar.gz, gui: "" }
+          - { goos: linux, goarch: arm64, ext: .tar.gz, gui: "" }
+          - { goos: darwin, goarch: amd64, ext: .tar.gz, gui: "" }
+          - { goos: darwin, goarch: arm64, ext: .tar.gz, gui: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -64,7 +64,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
-        run: go build -ldflags "-s -w" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
+        run: go build -ldflags "-s -w ${{ matrix.gui }}" -o "wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}" ./cmd/server
 
       # 版本串断言：二进制必须含源码 appVersion（防交叉编译矩阵里编错树/漏 ldflags）
       - name: 断言二进制版本串
@@ -75,6 +75,11 @@ jobs:
             exit 1
           fi
           echo "version assert OK: ${{ steps.ver.outputs.v }}"
+
+      - name: 断言 Windows GUI 子系统
+        if: matrix.goos == 'windows'
+        run: |
+          python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); o=struct.unpack_from("<I",d,0x3c)[0]; s=struct.unpack_from("<H",d,o+0x5c)[0]; print("subsystem",s); raise SystemExit(0 if s==2 else 1)' wb2api.exe
 
       - name: 打包（windows=zip 三件套，其余=tar.gz）
         run: |

@@ -20,6 +20,9 @@ config.json
 *.tmp
 __pycache__/
 
+# Runtime logs (Windows portable build)
+/logs/
+
 # Backups (contains auth tokens)
 backups/
 

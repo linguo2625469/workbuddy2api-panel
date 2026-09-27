@@ -260,16 +260,18 @@ docker compose down             # 停止并移除容器（数据在 ./auths 与 
 
 ```powershell
 # 1) 下载 Release 中的 wb2api.exe，或从源码构建
-go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
+.\scripts\build-windows.ps1
+# 等价命令：go build -trimpath -ldflags "-s -w -H=windowsgui" -o wb2api.exe ./cmd/server
 
-# 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
-.\wb2api.exe -config config.json
+# 2) 双击 wb2api.exe，或从任意终端运行
+.\wb2api.exe
 
-# 3) 浏览器打开面板添加账号
-#    http://127.0.0.1:7863/panel/
+# 3) 右键托盘图标 → 打开Panel；首次启动自动生成 config.json
 ```
 
-exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
+exe 为 **Windows GUI 子系统单文件**：启动不显示命令行窗口，前端资源与托盘图标都已 embed。托盘右键菜单固定为「打开Panel」「退出程序」；日志按天写入 exe 同目录的 `logs\yymmdd.log`。只需保证 exe 同目录以及 `auths/`（凭证）、`data/`（状态）目录可写。
+
+> 开发时使用 `go run ./cmd/server` 仍保留控制台输出；发布 exe 必须带 `-H=windowsgui`，请使用上面的构建脚本。
 
 ### 方式三：源码运行（开发调试）
 
@@ -288,6 +290,9 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 ```
+
+> Windows 上构建给最终用户运行的 `wb2api.exe` 时不要使用上面的裸 `go build`，应运行
+> `.\scripts\build-windows.ps1`；它会额外加入 `-H=windowsgui`，生成无控制台托盘版本。
 
 ### 添加账号（登录）
 
