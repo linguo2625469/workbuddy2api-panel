@@ -334,11 +334,12 @@ func (p *Pool) softDurationLocked(d time.Duration, streak int) time.Duration {
 
 // recordBreakerFailureLocked 累计一次熔断失败；达到阈值则按指数退避熔断。
 // 熔断与冷却（until）解耦：冷却按错误类别给固定时长，熔断则对"反复失败"逐次加长封禁。
+// 触发熔断返回 true（调用方负责在锁外 emitEvent，持锁路径不发通知）。
 // 调用方必须已持有 p.mu。
-func (p *Pool) recordBreakerFailureLocked(e *entry) {
+func (p *Pool) recordBreakerFailureLocked(e *entry) bool {
 	e.fails++
 	if e.fails < p.breakerThreshold {
-		return
+		return false
 	}
 	d := p.breakerCooldown
 	for i := 0; i < e.retryCount; i++ {
@@ -352,6 +353,7 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.fails = 0
 	e.retryCount++
 	e.breakerUntil = time.Now().Add(d)
+	return true
 }
 
 // CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。

@@ -55,6 +55,10 @@ type Config struct {
 	// 待办并执行，与面板「执行全部待办」按钮同管线）。调度器只管时点不管实现——
 	// panel 在 scheduler 之后构造，用 SetGrowthHook 事后挂载；nil 时到点跳过。
 	GrowthHook func()
+
+	// NotifyHook 通知推送回调（uid, message）：签到失败等运维事件经此派发，
+	// nil = 不推送。与 GrowthHook 同风格的事后挂载（SetNotifyHook）。
+	NotifyHook func(uid, message string)
 }
 
 // Scheduler 调度器。
@@ -132,6 +136,13 @@ func (s *Scheduler) SetExpiringSoonWindow(d time.Duration) {
 func (s *Scheduler) SetGrowthHook(fn func()) {
 	s.schedMu.Lock()
 	s.cfg.GrowthHook = fn
+	s.schedMu.Unlock()
+}
+
+// SetNotifyHook 挂载通知推送回调（签到失败等事件；nil = 不推送）。
+func (s *Scheduler) SetNotifyHook(fn func(uid, message string)) {
+	s.schedMu.Lock()
+	s.cfg.NotifyHook = fn
 	s.schedMu.Unlock()
 }
 
@@ -445,6 +456,7 @@ func (s *Scheduler) RunCheckinNow() {
 				log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(st.UID, st.Nickname))
 			} else {
 				log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+				s.notifyCheckinFailed(st.UID, st.Nickname, err)
 			}
 			// 其余业务错误也继续走余额查询
 		} else {
@@ -462,6 +474,17 @@ func (s *Scheduler) RunCheckinNow() {
 		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
 	}
 	s.RunStreakBonusNow()
+}
+
+// notifyCheckinFailed 签到失败时派发通知（幂等"已签到"不算失败，不触发）。
+func (s *Scheduler) notifyCheckinFailed(uid, nickname string, err error) {
+	s.schedMu.Lock()
+	hook := s.cfg.NotifyHook
+	s.schedMu.Unlock()
+	if hook != nil {
+		hook(uid, fmt.Sprintf("⚠️ 签到失败\n账号: %s\n错误: %v\n时间: %s",
+			logfmt.Label(uid, nickname), err, time.Now().Format("2006-01-02 15:04:05")))
+	}
 }
 
 // RunActivityNow 立即对池内所有可用账号执行一次对话活跃上报。

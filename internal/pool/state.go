@@ -14,10 +14,11 @@ import (
 
 func (p *Pool) Disable(uid, reason string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
 		p.disableLocked(e, reason)
 	}
+	p.mu.Unlock()
+	p.emitEvent(EventDisabled, uid, reason)
 }
 
 // NoteSessionDead 记录一次 ErrSessionDead（12153）——**不立即禁用**。
@@ -31,17 +32,20 @@ func (p *Pool) Disable(uid, reason string) {
 // disabled 号，实际只有「已 disabled 后复活且计数未清」这类场景才会走到这里。
 func (p *Pool) NoteSessionDead(uid string) bool {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		p.mu.Unlock()
 		return false
 	}
 	e.sessionDeadFails++
 	if e.sessionDeadFails < sessionDeadThreshold {
+		p.mu.Unlock()
 		return false
 	}
 	e.sessionDeadFails = 0
 	p.disableLocked(e, sessionDeadReason)
+	p.mu.Unlock()
+	p.emitEvent(EventDisabled, uid, sessionDeadReason)
 	return true
 }
 
@@ -122,14 +126,19 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 
 // NoteError 记录一次错误：喂入唯一的连续失败计数器 fails + 累计错误 errTotal。
 // 达到 breakerThreshold 触发熔断（指数退避），连续失败语义整体并入熔断器（不再有独立的 err 冷却）。
+// 触发熔断时在锁外派发 EventBreaker（供通知推送）。
 func (p *Pool) NoteError(uid string) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	tripped := false
 	if e, ok := p.byUID[uid]; ok {
 		e.errTotal++
 		e.lastErr = time.Now()
-		p.recordBreakerFailureLocked(e)
+		tripped = p.recordBreakerFailureLocked(e)
 		p.dirty.Store(true)
+	}
+	p.mu.Unlock()
+	if tripped {
+		p.emitEvent(EventBreaker, uid, "连续错误达到熔断阈值")
 	}
 }
 
@@ -187,9 +196,9 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		per1k = 0
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	e, ok := p.byUID[uid]
 	if !ok {
+		p.mu.Unlock()
 		return
 	}
 	if credit > 0 {
@@ -234,6 +243,19 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		}
 	}
 	p.dirty.Store(true) // 账本已持久化：写入口统一置脏
+	// 消耗钩子快照（锁内取值、锁外回调）：扣费后的余额 + 本次消耗。
+	fn := p.onConsume
+	var nickname string
+	var remain, total int64
+	if fn != nil && credit > 0 {
+		nickname = e.a.Nickname
+		remain = e.credits
+		total = e.creditsTotal
+	}
+	p.mu.Unlock()
+	if fn != nil && credit > 0 {
+		go fn(uid, nickname, credit, remain, total)
+	}
 }
 
 // RecordTokenUsage 记录一次实际发起的聊天账号尝试及上游返回的 usage 增量。

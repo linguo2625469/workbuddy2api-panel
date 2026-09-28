@@ -172,7 +172,7 @@ $('btnKey').onclick = async () => {
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', notify: '通知', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -184,6 +184,7 @@ function go(v) {
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'taskscenter') reattachQueueView();
+  if (v === 'notify') loadNotify();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 go((location.hash || '#accounts').slice(1) in TITLES ? (location.hash || '#accounts').slice(1) : 'accounts');
@@ -641,95 +642,209 @@ $('cfgForm').onsubmit = async ev => {
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
 };
 
-/* ── 添加账号 ─────────────────────────────────────────────────────── */
-function openAdd() {
-  $('addVeil').classList.add('on');
-  // 重置到登录标签
-  switchAddTab('login');
-  $('addPick').hidden = false;
-  $('addLoad').hidden = true; $('addReady').hidden = true;
-  $('addDone').hidden = true; $('addErr').hidden = true;
-  $('importDone').hidden = true; $('importErr').hidden = true;
-  $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
-  $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
-  stopPoll();
+/* ── 通知渠道 ─────────────────────────────────────────────────────── */
+/* 布局对齐 xianyu 通知渠道页：类型选择网格（图标卡片 + 已配置角标）→
+   已配置渠道列表（图标 + 名称 + 启用胶囊 + 测试/编辑/删除）→ 弹窗（名称 + JSON 配置）。
+   配置为自由 JSON（与 xianyu 一致），含 secret/password/token 等敏感键按原样入库。 */
+const NF_TYPES = {
+  dingtalk: { label: '钉钉通知', desc: '钉钉机器人消息',
+    hint: '请设置钉钉机器人 Webhook URL，可选填加签密钥（secret）',
+    placeholder: '{"webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=..."}',
+    def: { webhook_url: 'https://oapi.dingtalk.com/robot/send?access_token=你的access_token', secret: '' } },
+  feishu: { label: '飞书通知', desc: '飞书机器人消息',
+    hint: '请设置飞书机器人 Webhook URL，可选填签名校验密钥（secret）',
+    placeholder: '{"webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/..."}',
+    def: { webhook_url: 'https://open.feishu.cn/open-apis/bot/v2/hook/你的hook_id', secret: '' } },
+  wechat: { label: '微信通知', desc: '企业微信机器人',
+    hint: '请设置企业微信机器人 Webhook URL',
+    placeholder: '{"webhook_url": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."}',
+    def: { webhook_url: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key' } },
+  bark: { label: 'Bark通知', desc: 'iOS推送通知',
+    hint: 'Bark 是 iOS 推送通知服务，需要填写设备密钥',
+    placeholder: '{"device_key": "xxx", "server_url": "https://api.day.app"}',
+    def: { device_key: '你的设备密钥', server_url: 'https://api.day.app' } },
+  email: { label: '邮件通知', desc: 'SMTP邮件发送',
+    hint: '需要填写 SMTP 服务器、端口、发送邮箱、授权码和接收邮箱（465=SSL、587=STARTTLS）',
+    placeholder: '{"smtp_server": "...", "smtp_port": 587, "email_user": "...", "email_password": "...", "recipient_email": "..."}',
+    def: { smtp_server: 'smtp.qq.com', smtp_port: 587, email_user: '你的邮箱@qq.com', email_password: '你的授权码', recipient_email: '接收邮箱@example.com' } },
+  telegram: { label: 'Telegram', desc: 'Telegram机器人',
+    hint: '需要填写 Bot Token 和 Chat ID',
+    placeholder: '{"bot_token": "...", "chat_id": "..."}',
+    def: { bot_token: '你的Bot_Token', chat_id: '你的Chat_ID' } },
+  pushplus: { label: 'PushPlus', desc: '微信公众号推送',
+    hint: '需要填写 PushPlus 的 token，topic 为群组编码（可选）',
+    placeholder: '{"token": "...", "topic": "", "template": "txt"}',
+    def: { token: '你的token', topic: '', template: 'txt' } },
+  webhook: { label: 'Webhook', desc: '自定义HTTP请求',
+    hint: '填写自定义 Webhook URL；可选 http_method（POST/PUT）与 headers（JSON 字符串）',
+    placeholder: '{"webhook_url": "https://..."}',
+    def: { webhook_url: 'https://你的webhook地址', http_method: 'POST', headers: '{}' } },
+};
+const NF_TYPE_ORDER = ['dingtalk', 'feishu', 'wechat', 'bark', 'email', 'telegram', 'pushplus', 'webhook'];
+const NF_ICO = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2a4 4 0 0 0-4 4v2.2c0 .5-.2 1-.6 1.4L2.5 10.5h11l-.9-.9a2 2 0 0 1-.6-1.4V6a4 4 0 0 0-4-4z"/><path d="M6.5 12.5a1.5 1.5 0 0 0 3 0"/></svg>';
+const NF_ICO_SEND = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M14 2 7.5 8.5M14 2l-4.5 12-2-5.5L2 6.5z"/></svg>';
+const NF_ICO_EDIT = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M11 2.5 13.5 5 5 13.5l-3.2.7.7-3.2z"/></svg>';
+const NF_ICO_TRASH = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 4h11M6.5 4V2.5h3V4M4 4l.7 9.5h6.6L12 4"/></svg>';
+let nfChannels = [];   // 已保存渠道（loadNotify 拉取）
+let nfEditIdx = -1;    // 正在编辑的下标；-1 = 新增
+let nfEditType = 'dingtalk';
+
+async function loadNotify() {
+  try {
+    const d = await api('config');
+    nfChannels = (d.config && d.config.notifications) || [];
+    renderNotifyTypes();
+    renderNotifyList();
+  } catch (e) { toast('读取通知配置失败：' + e.message, 'err'); }
 }
-function switchAddTab(tab) {
-  document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
-  $('addTabLogin').hidden = tab !== 'login';
-  $('addTabImport').hidden = tab !== 'import';
+
+function renderNotifyTypes() {
+  $('notifyTypeGrid').innerHTML = NF_TYPE_ORDER.map(ty => {
+    const t = NF_TYPES[ty];
+    const n = nfChannels.filter(c => c.type === ty).length;
+    return '<div class="nf-type' + (n ? ' has' : '') + '">' +
+      (n ? '<span class="cnt">' + n + '</span>' : '') +
+      '<div class="ico">' + NF_ICO + '</div>' +
+      '<div class="lb">' + t.label + '</div>' +
+      '<div class="ds">' + t.desc + '</div>' +
+      '<button class="add" data-nfadd="' + ty + '">' + (n ? '＋ 新建' : '＋ 配置') + '</button>' +
+      '</div>';
+  }).join('');
 }
-document.querySelectorAll('#addTabs .tab').forEach(b => {
-  b.onclick = () => switchAddTab(b.dataset.tab);
+
+function renderNotifyList() {
+  const box = $('notifyConfiguredBox');
+  if (!nfChannels.length) { box.hidden = true; return; }
+  box.hidden = false;
+  $('notifyList').innerHTML = nfChannels.map((c, i) => {
+    const t = NF_TYPES[c.type] || { label: c.type };
+    return '<div class="nf-row">' +
+      '<div class="ico' + (c.enabled ? ' on' : '') + '">' + NF_ICO + '</div>' +
+      '<div style="min-width:0"><div class="nm">' + esc(c.name) + '</div><div class="ty">' + esc(t.label) + '</div></div>' +
+      '<span class="grow"></span>' +
+      '<button class="st ' + (c.enabled ? 'on' : 'off') + '" data-nf="toggle" data-i="' + i + '" title="' + (c.enabled ? '点击禁用' : '点击启用') + '">' + (c.enabled ? '启用' : '禁用') + '</button>' +
+      '<div class="acts">' +
+        '<button data-nf="test" data-i="' + i + '" title="测试">' + NF_ICO_SEND + '</button>' +
+        '<button data-nf="edit" data-i="' + i + '" title="编辑">' + NF_ICO_EDIT + '</button>' +
+        '<button class="danger" data-nf="del" data-i="' + i + '" title="删除">' + NF_ICO_TRASH + '</button>' +
+      '</div></div>';
+  }).join('');
+}
+
+$('notifyTypeGrid').addEventListener('click', ev => {
+  const btn = ev.target.closest('button[data-nfadd]');
+  if (btn) openNotifyDlg(-1, btn.dataset.nfadd);
 });
-function startAddLogin() {
-  const realm = (document.querySelector('input[name="addRealm"]:checked') || {}).value || 'cn';
-  $('btnStartLogin').disabled = true;
-  $('addLoad').hidden = false; $('addErr').hidden = true;
-  api('login/start', { method: 'POST', body: JSON.stringify({ realm }) }).then(r => {
-    loginState = r.state;
-    $('addUrl').textContent = r.url;
-    $('addPick').hidden = true; // 选域锁定（会话已按该域发起）
-    $('addLoad').hidden = true; $('addReady').hidden = false;
-    $('btnStartLogin').hidden = true;
-    $('btnCopyUrl').hidden = false; $('btnOpenUrl').hidden = false;
-    loginTimer = setInterval(pollLogin, 3000);
-  }).catch(e => {
-    $('addLoad').hidden = true;
-    $('btnStartLogin').disabled = false;
-    $('addErr').hidden = false;
-    $('addErr').textContent = e.message;
-  });
-}
-function stopPoll() { if (loginTimer) { clearInterval(loginTimer); loginTimer = null; } }
-async function pollLogin() {
-  if (!loginState) return;
+$('notifyList').addEventListener('click', async ev => {
+  const btn = ev.target.closest('button[data-nf]');
+  if (!btn) return;
+  const i = Number(btn.dataset.i);
+  const c = nfChannels[i];
+  if (!c) return;
+  if (btn.dataset.nf === 'edit') return openNotifyDlg(i, c.type);
+  if (btn.dataset.nf === 'del') {
+    if (!confirm('确定要删除渠道「' + c.name + '」吗？删除后无法恢复。')) return;
+    nfChannels.splice(i, 1);
+    return saveNotifyChannels('渠道已删除');
+  }
+  if (btn.dataset.nf === 'toggle') {
+    c.enabled = !c.enabled;
+    return saveNotifyChannels(c.enabled ? '渠道已启用' : '渠道已禁用');
+  }
+  if (btn.dataset.nf === 'test') {
+    btn.disabled = true;
+    try {
+      const r = await api('notify/test', { method: 'POST', body: JSON.stringify({ name: c.name }) });
+      if (r.ok) toast('测试消息已发送到「' + c.name + '」', 'ok');
+      else toast('发送失败：' + (r.error || '未知错误'), 'err');
+    } catch (e) { toast('发送失败：' + e.message, 'err'); }
+    finally { btn.disabled = false; }
+  }
+});
+
+/* 保存 channels 到 config（通用配置保存管线：合并 → 校验 → 落盘 → 热生效） */
+async function saveNotifyChannels(doneMsg) {
+  const snapshot = JSON.parse(JSON.stringify(nfChannels));
   try {
-    const r = await api('login/poll?state=' + encodeURIComponent(loginState));
-    if (r.done) {
-      stopPoll();
-      $('addReady').hidden = true;
-      $('addDone').hidden = false;
-      $('addDone').textContent = '已添加 ' + (r.nickname || r.uid) + (r.realm === 'global' ? '（国际版）' : '') + (r.credits >= 0 ? ' · 积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + '，账号已载入池中';
-      setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
-    }
+    await api('config', { method: 'POST', body: JSON.stringify({ notifications: nfChannels }) });
+    toast(doneMsg + '（已生效）', 'ok');
+    loadNotify();
   } catch (e) {
-    stopPoll();
-    $('addReady').hidden = true;
-    $('addErr').hidden = false;
-    $('addErr').textContent = e.message + '（关闭后重新添加）';
+    nfChannels = snapshot; // 保存失败回滚本地态
+    toast('保存失败：' + e.message, 'err');
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
-$('btnCloseAdd').onclick = closeAdd;
-$('btnStartLogin').onclick = startAddLogin;
-$('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
-$('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
-  .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
-$('importFile').onchange = async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
-  $('importDone').hidden = true; $('importErr').hidden = true;
-  const fd = new FormData();
-  fd.append('file', file);
-  const h = {};
-  const k = localStorage.getItem(LS_KEY);
-  if (k) h['Authorization'] = 'Bearer ' + k;
-  try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      console.warn('import errors:', d.errors);
-    }
-    loadOverview(true);
-  } catch (e) {
-    $('importErr').hidden = false;
-    $('importErr').textContent = '导入失败：' + e.message;
+
+function openNotifyDlg(idx, type) {
+  nfEditIdx = idx;
+  nfEditType = type || 'dingtalk';
+  const t = NF_TYPES[nfEditType];
+  const c = idx >= 0 ? nfChannels[idx] : null;
+  $('notifyDlgTitle').textContent = (idx >= 0 ? '编辑' : '配置') + t.label;
+  // 新建时同类型已存在则名称追加序号（对齐 xianyu 交互）
+  let name = t.label;
+  if (c) name = c.name;
+  else {
+    const n = nfChannels.filter(x => x.type === nfEditType).length;
+    if (n > 0) name = t.label + ' ' + (n + 1);
   }
-  $('importFile').value = '';
+  $('nfName').value = name;
+  $('nfName').placeholder = '如：我的' + t.label;
+  const cfg = (c && c.config && Object.keys(c.config).length) ? c.config : t.def;
+  // template 键从 JSON 区抽到独立编辑框（与 xianyu 的模板编辑一致），保存时合并回 config。
+  const { template: tpl, ...rest } = cfg;
+  $('nfConfig').value = JSON.stringify(rest, null, 2);
+  $('nfConfig').placeholder = t.placeholder;
+  $('nfTemplate').value = tpl || '';
+  $('nfTypeHint').textContent = t.hint || '';
+  $('nfEnabled').checked = !c || c.enabled !== false;
+  $('nfErr').hidden = true; $('nfTestOk').hidden = true;
+  $('notifyVeil').classList.add('on');
+}
+
+function collectNfChannel() {
+  let cfg = {};
+  const raw = $('nfConfig').value.trim();
+  if (raw) {
+    try { cfg = JSON.parse(raw); } catch { return { error: '配置 JSON 格式错误' }; }
+    if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) return { error: '配置应为 JSON 对象' };
+  }
+  const name = $('nfName').value.trim();
+  if (!name) return { error: '请输入渠道名称' };
+  // 模板合并回 config.template（空串删除键 = 恢复系统默认正文）。
+  const tpl = $('nfTemplate').value;
+  if (tpl.trim()) cfg.template = tpl;
+  else delete cfg.template;
+  return { name: name, type: nfEditType, config: cfg, enabled: $('nfEnabled').checked };
+}
+
+$('btnNotifyRefresh').onclick = loadNotify;
+$('btnNotifyCancel').onclick = () => $('notifyVeil').classList.remove('on');
+$('btnNotifySave').onclick = async () => {
+  const c = collectNfChannel();
+  if (c.error) { $('nfErr').textContent = c.error; $('nfErr').hidden = false; return; }
+  const dup = nfChannels.findIndex((x, i) => x.name === c.name && i !== nfEditIdx);
+  if (dup >= 0) { $('nfErr').textContent = '渠道名称与「' + nfChannels[dup].name + '」重复'; $('nfErr').hidden = false; return; }
+  if (nfEditIdx >= 0) {
+    // 保留原渠道的 events 订阅（弹窗不编辑该字段）
+    c.events = nfChannels[nfEditIdx].events || [];
+    nfChannels[nfEditIdx] = c;
+  } else nfChannels.push(c);
+  $('notifyVeil').classList.remove('on');
+  saveNotifyChannels('渠道已保存');
+};
+$('btnNotifyTest').onclick = async () => {
+  const c = collectNfChannel();
+  if (c.error) { $('nfErr').textContent = c.error; $('nfErr').hidden = false; return; }
+  const btn = $('btnNotifyTest');
+  btn.disabled = true; btn.textContent = '发送中…';
+  $('nfErr').hidden = true; $('nfTestOk').hidden = true;
+  try {
+    const r = await api('notify/test', { method: 'POST', body: JSON.stringify({ type: c.type, config: c.config }) });
+    if (r.ok) { $('nfTestOk').textContent = '测试消息发送成功，请查收。'; $('nfTestOk').hidden = false; }
+    else { $('nfErr').textContent = '发送失败：' + (r.error || '未知错误'); $('nfErr').hidden = false; }
+  } catch (e) { $('nfErr').textContent = '发送失败：' + e.message; $('nfErr').hidden = false; }
+  finally { btn.disabled = false; btn.textContent = '发送测试'; }
 };
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */

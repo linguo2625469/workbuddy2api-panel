@@ -68,6 +68,13 @@ type Pool struct {
 	stopCh chan struct{}
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
 	closeOnce sync.Once
+
+	// onEvent 事件钩子（SetOnEvent 注入，nil = 不派发）：账号禁用/触发熔断时在
+	// 持锁路径外异步回调，供通知推送等观测用途。签名 (event, uid, detail)。
+	onEvent func(event, uid, detail string)
+	// onConsume 消耗钩子（SetOnConsume 注入，nil = 不派发）：NoteModelCost 记一笔
+	// 实测扣费时回调（含扣费后的余额快照），供积分消耗报告推送。
+	onConsume func(uid, nickname string, consume float64, remain, total int64)
 }
 
 // defaultBreaker* 熔断器默认参数（FreeBuff2API 参考口径）。
@@ -94,6 +101,40 @@ func New(stateFp string) *Pool {
 		p.startFlusher()
 	}
 	return p
+}
+
+// SetOnEvent 注入状态事件钩子（禁用/熔断触发时回调）。回调在池锁外异步触发，
+// 不得回调池的写方法（Disable/NoteError 等）——只做观测（通知推送/审计日志）。
+func (p *Pool) SetOnEvent(fn func(event, uid, detail string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onEvent = fn
+}
+
+// SetOnConsume 注入消耗钩子（NoteModelCost 记一笔实测扣费时回调）。同样在锁外
+// 异步触发，只做观测（积分消耗报告推送）。
+func (p *Pool) SetOnConsume(fn func(uid, nickname string, consume float64, remain, total int64)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.onConsume = fn
+}
+
+// 池状态事件类型（SetOnEvent 回调的 event 参数；与 notify 包事件常量同值，
+// pool 不依赖 notify 避免循环导入——装配层（main）做字符串映射）。
+const (
+	EventDisabled = "disabled" // 账号被禁用（Disable / NoteSessionDead 达阈）
+	EventBreaker  = "breaker"  // 连续错误达阈值触发熔断
+)
+
+// emitEvent 在持锁路径外派发事件（调用方先收集再解锁后调用本方法——
+// 当前实现直接 go 出去，闭包内不再触碰池锁，无重入风险）。
+func (p *Pool) emitEvent(event, uid, detail string) {
+	p.mu.RLock()
+	fn := p.onEvent
+	p.mu.RUnlock()
+	if fn != nil {
+		go fn(event, uid, detail)
+	}
 }
 
 // Close 停止后台落盘 goroutine 并做最后一次落盘（幂等）。

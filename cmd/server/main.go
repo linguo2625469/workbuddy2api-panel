@@ -19,6 +19,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -180,6 +181,43 @@ func main() {
 		BlackcatDisabled:   !cfg.Schedule.BlackcatEnabled,
 		GrowthDisabled:     !cfg.Schedule.GrowthEnabled,
 	})
+
+	// 通知推送：渠道配置热生效（面板保存 → notifier.SetChannels）；
+	// 事件源三个——scheduler 签到失败、pool 禁用/熔断、pool 消耗记账（积分报告）。
+	notifier := notify.NewNotifier(&http.Client{Timeout: 15 * time.Second}, 30*time.Minute)
+	notifier.SetChannels(cfg.Notifications)
+	if len(cfg.Notifications) > 0 {
+		log.Printf("通知渠道已启用：%d 个（签到失败/熔断/禁用/积分消耗时推送）", len(cfg.Notifications))
+	}
+	sch.SetNotifyHook(func(uid, message string) {
+		nick := uid
+		if st, ok := p.Status(uid); ok && st.Nickname != "" {
+			nick = st.Nickname
+		}
+		notifier.Notify(notify.EventCheckinFailed, uid, message, map[string]string{
+			"nickname": nick, "uid": uid, "event": notify.EventCheckinFailed,
+			"message": message, "time": time.Now().Format("2006-01-02 15:04:05"),
+		})
+	})
+	p.SetOnEvent(func(event, uid, detail string) {
+		name := uid
+		if st, ok := p.Status(uid); ok && st.Nickname != "" {
+			name = st.Nickname
+		}
+		title := "⚠️ 账号已禁用"
+		if event == pool.EventBreaker {
+			title = "🔥 账号触发熔断"
+		}
+		msg := fmt.Sprintf("%s\n账号: %s\n原因: %s\n时间: %s",
+			title, name, detail, time.Now().Format("2006-01-02 15:04:05"))
+		notifier.Notify(event, uid, msg, map[string]string{
+			"nickname": name, "uid": uid, "event": event, "message": msg,
+			"time": time.Now().Format("2006-01-02 15:04:05"),
+		})
+	})
+	p.SetOnConsume(func(uid, nickname string, consume float64, remain, total int64) {
+		notifier.ReportCredit(uid, nickname, consume, remain, total)
+	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
 		log.Printf("签到已禁用（schedule.checkin_enabled=false）")
@@ -264,11 +302,12 @@ func main() {
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
 		ConfigPath: *cfgPath,
+		Notifier:   notifier,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, notifier)
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -352,7 +391,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, notifier *notify.Notifier) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -435,6 +474,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
+	notifier.SetChannels(newCfg.Notifications) // 通知渠道保存即热生效
 
 	return restartRequiredFields(newCfg), nil
 }

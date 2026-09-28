@@ -162,11 +162,11 @@ button.danger { color: var(--bad); }
 button.danger:hover:not(:disabled) { border-color: var(--bad); }
 button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
 button.icon { padding: 7px 9px; }
-input, select {
+input, select, textarea {
   font: inherit; color: var(--ink); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; width: 100%;
 }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
@@ -459,6 +459,47 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     margin-top: 6px; background: var(--surface-2); }
   .pk-card .expirybar i { display: block; height: 100%; min-width: 2px; }
 
+  /* ── 通知渠道 ───────────────────────────────────────────────── */
+  /* 类型选择网格：图标卡片 + 已配置数量角标（布局对齐 xianyu 通知渠道页） */
+  .nf-type-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .nf-type { position: relative; border: 1.5px solid var(--line-soft); border-radius: 10px;
+    padding: 14px 10px 12px; text-align: center; transition: border-color .15s, background .15s; }
+  .nf-type:hover { border-color: var(--accent); }
+  .nf-type.has { border-color: var(--accent); background: var(--accent-soft); }
+  .nf-type .cnt { position: absolute; top: 7px; right: 7px; min-width: 19px; height: 19px;
+    padding: 0 6px; border-radius: 10px; background: var(--accent); color: #fff;
+    font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; }
+  .nf-type .ico { width: 38px; height: 38px; margin: 0 auto 8px; border-radius: 9px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface-2); color: var(--ink-3); }
+  .nf-type.has .ico { background: var(--accent); color: #fff; }
+  .nf-type .ico svg { width: 18px; height: 18px; }
+  .nf-type .lb { font-weight: 600; font-size: 12.5px; }
+  .nf-type .ds { font-size: 11px; color: var(--ink-3); margin-top: 2px; }
+  .nf-type .add { margin-top: 9px; font-size: 11.5px; padding: 2px 12px; border-radius: 5px;
+    border: 1px solid var(--accent); color: var(--accent); background: transparent; }
+  .nf-type .add:hover { background: var(--accent-soft); }
+  /* 已配置渠道列表行 */
+  .nf-row { display: flex; align-items: center; gap: 12px; padding: 10px 4px;
+    border-bottom: 1px solid var(--line-soft); }
+  .nf-row:last-child { border-bottom: 0; }
+  .nf-row .ico { width: 32px; height: 32px; border-radius: 8px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--surface-2); color: var(--ink-3); }
+  .nf-row .ico.on { background: var(--accent-soft); color: var(--accent); }
+  .nf-row .ico svg { width: 15px; height: 15px; }
+  .nf-row .nm { font-weight: 600; font-size: 13px; }
+  .nf-row .ty { font-size: 11px; color: var(--ink-3); margin-top: 1px; }
+  .nf-row .st { font-size: 11.5px; padding: 2px 9px; border-radius: 5px; }
+  .nf-row .st.on { background: rgba(34,197,94,.14); color: var(--ok); }
+  .nf-row .st.off { background: var(--surface-2); color: var(--ink-3); }
+  .nf-row .acts { display: flex; gap: 4px; }
+  .nf-row .acts button { padding: 5px 7px; border-radius: 6px; color: var(--ink-3); }
+  .nf-row .acts button:hover { background: var(--surface-2); color: var(--ink); }
+  .nf-row .acts button.danger:hover { color: var(--bad); }
+  .nf-row .acts svg { width: 14px; height: 14px; display: block; }
+  .nf-empty { padding: 26px 0; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
 </style>
 </head>
 <body>
@@ -481,6 +522,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <li><a href="#taskscenter" data-view="taskscenter">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
         任务中心</a></li>
+      <li><a href="#notify" data-view="notify">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 2a4 4 0 0 0-4 4v2.2c0 .5-.2 1-.6 1.4L2.5 10.5h11l-.9-.9a2 2 0 0 1-.6-1.4V6a4 4 0 0 0-4-4z"/><path d="M6.5 12.5a1.5 1.5 0 0 0 3 0"/></svg>
+        通知</a></li>
       <li><a href="#models" data-view="models">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         模型与档位</a></li>
@@ -903,6 +947,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </form>
     </section>
 
+    <!-- 通知渠道 -->
+    <section class="view" id="view-notify" hidden>
+      <div class="box">
+        <header>
+          <h3>选择通知方式</h3>
+          <span class="grow"></span>
+          <button id="btnNotifyRefresh">刷新</button>
+        </header>
+        <div class="pad">
+          <div class="hint" style="margin-bottom:12px">点击下方按钮选择通知渠道类型新建，同一类型可创建多个。推送事件：签到失败 / 连续错误触发熔断 / 账号被禁用；保存后立即生效，同账号同类事件 30 分钟内只推一次。</div>
+          <div class="nf-type-grid" id="notifyTypeGrid"></div>
+        </div>
+      </div>
+      <div class="box" id="notifyConfiguredBox" hidden>
+        <header><h3>已配置渠道</h3></header>
+        <div class="pad" style="padding-top:4px;padding-bottom:4px">
+          <div id="notifyList"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- 日志 -->
     <section class="view" id="view-logs" hidden>
       <div class="box">
@@ -1021,6 +1086,35 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 通知渠道编辑 -->
+<div class="veil" id="notifyVeil">
+  <div class="dlg">
+    <header>
+      <h3 id="notifyDlgTitle">配置通知渠道</h3>
+    </header>
+    <div class="body">
+      <label class="fld" style="display:block;margin-bottom:10px"><span class="lb">渠道名称</span>
+        <input id="nfName" placeholder=""></label>
+      <label class="fld" style="display:block;margin-bottom:4px"><span class="lb">配置 (JSON)</span>
+        <textarea id="nfConfig" rows="6" placeholder="" style="width:100%;font-family:var(--mono);font-size:12.5px;resize:none"></textarea></label>
+      <div class="hint" id="nfTypeHint" style="margin-bottom:12px"></div>
+      <label class="fld" style="display:block;margin-bottom:4px"><span class="lb">通知正文模板（留空 = 系统默认）</span>
+        <textarea id="nfTemplate" rows="4" placeholder="留空使用系统默认正文" style="width:100%;font-family:var(--mono);font-size:12.5px;resize:vertical"></textarea></label>
+      <div class="hint" style="margin-bottom:12px">支持占位符：{{nickname}} 账号昵称、{{uid}}、{{event}} 事件、{{credits}} 剩余积分、{{credits_total}} 积分总额、{{consume}} 消耗、{{time}} 时间。积分报告事件默认 5 分钟窗口聚合推送。</div>
+      <div class="switch"><span class="lb">启用此渠道</span>
+        <input type="checkbox" id="nfEnabled" checked></div>
+      <div class="state err" id="nfErr" hidden style="margin-top:10px"></div>
+      <div class="state ok" id="nfTestOk" hidden style="margin-top:10px"></div>
+    </div>
+    <footer>
+      <button class="xs" id="btnNotifyTest">发送测试</button>
+      <span class="grow"></span>
+      <button id="btnNotifyCancel">取消</button>
+      <button class="primary" id="btnNotifySave">保存</button>
     </footer>
   </div>
 </div>

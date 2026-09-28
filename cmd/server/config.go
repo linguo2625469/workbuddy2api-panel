@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/notify"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
@@ -171,6 +172,10 @@ type Config struct {
 		TTL        string `json:"ttl"`         // 会话绑定 TTL，默认 "30m"
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
+
+	// Notifications 通知渠道列表（面板「通知」页维护，保存即热生效）。
+	// 事件源：签到失败（checkin_failed）、连续错误熔断（breaker）、账号禁用（disabled）。
+	Notifications []notify.Channel `json:"notifications"`
 
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
@@ -532,7 +537,49 @@ func (c *Config) normalize() error {
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
+	if err := c.validateNotifications(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// validateNotifications 校验通知渠道：名称非空、类型受支持、同名去重、事件名合法。
+// 配置不完整（如缺 webhook_url）不在此拦截——测试发送时会给出具体错误，
+// 保存阶段只拦「必然无法工作」的形态错误。
+func (c *Config) validateNotifications() error {
+	seen := map[string]bool{}
+	for i, ch := range c.Notifications {
+		if strings.TrimSpace(ch.Name) == "" {
+			return fmt.Errorf("notifications[%d]: 渠道名称不能为空", i)
+		}
+		if seen[ch.Name] {
+			return fmt.Errorf("notifications[%d]: 渠道名称 %q 重复", i, ch.Name)
+		}
+		seen[ch.Name] = true
+		switch ch.Type {
+		case "dingtalk", "ding_talk", "feishu", "lark", "bark", "email", "webhook", "wechat", "telegram", "pushplus":
+		default:
+			return fmt.Errorf("notifications[%d] (%s): 不支持的渠道类型 %q", i, ch.Name, ch.Type)
+		}
+		for _, e := range ch.Events {
+			switch e {
+			case notify.EventCheckinFailed, notify.EventBreaker, notify.EventDisabled, notify.EventCreditReport:
+			default:
+				return fmt.Errorf("notifications[%d] (%s): 未知事件 %q（可选 %s/%s/%s/%s）",
+					i, ch.Name, e, notify.EventCheckinFailed, notify.EventBreaker, notify.EventDisabled, notify.EventCreditReport)
+			}
+		}
+		// 模板校验：config.template 存在时必须合法（与保存即生效口径一致，脏模板在
+		// 保存时拦截而不是推送时静默回落）。
+		if ch.Config != nil {
+			if tpl, ok := ch.Config["template"].(string); ok && tpl != "" {
+				if err := notify.ValidateTemplate(tpl); err != nil {
+					return fmt.Errorf("notifications[%d] (%s): 通知模板无效——%v", i, ch.Name, err)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
