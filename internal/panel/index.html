@@ -6,29 +6,30 @@
 <title>WorkBuddy2API · 控制台</title>
 <style>
 /* ── 设计令牌：明暗两套独立色板 ─────────────────────────────────────────
-   冷石墨基调（仪表盘语言，非营销页）：底色分层 + 单一靛蓝强调（仅交互），
-   语义色只给状态。等宽数字承载所有观测值，tabular-nums 对齐。 */
+   shadcn 中性基调：纯灰阶无色彩倾向（去掉原冷蓝底与靛蓝强调），分层靠
+   亮度而不是色相；强调色即前景色（深色模式近白 / 浅色模式近黑），语义色
+   只给状态、不参与装饰。等宽数字承载所有观测值，tabular-nums 对齐。 */
 :root {
-  --bg: #0c0e14; --surface: #14171f; --surface-2: #1a1e28; --raise: #202531;
-  --line: #262c3a; --line-soft: #1e232e;
-  --ink: #e8ebf2; --ink-2: #a8b0c2; --ink-3: #6b7488;
-  --accent: #5b7cfa; --accent-ink: #ffffff; --accent-soft: rgba(91,124,250,.13);
-  --ok: #3ddc97; --ok-soft: rgba(61,220,151,.12);
-  --warn: #f5b544; --warn-soft: rgba(245,181,68,.12);
-  --bad: #f0655f; --bad-soft: rgba(240,101,95,.12);
-  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.5);
+  --bg: #0a0a0a; --surface: #171717; --surface-2: #262626; --raise: #262626;
+  --line: rgba(255,255,255,.10); --line-soft: rgba(255,255,255,.06);
+  --ink: #fafafa; --ink-2: #a3a3a3; --ink-3: #737373;
+  --accent: #fafafa; --accent-ink: #171717; --accent-soft: rgba(255,255,255,.10);
+  --ok: #4ade80; --ok-soft: rgba(74,222,128,.12);
+  --warn: #fbbf24; --warn-soft: rgba(251,191,36,.12);
+  --bad: #f87171; --bad-soft: rgba(248,113,113,.12);
+  --shadow: 0 1px 2px rgba(0,0,0,.30);
   --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 [data-theme="light"] {
-  --bg: #f4f5f8; --surface: #ffffff; --surface-2: #f8f9fb; --raise: #ffffff;
-  --line: #e2e5ec; --line-soft: #eceef3;
-  --ink: #14171f; --ink-2: #545c6e; --ink-3: #8b93a5;
-  --accent: #3d5fe0; --accent-ink: #ffffff; --accent-soft: rgba(61,95,224,.09);
-  --ok: #0f9d63; --ok-soft: rgba(15,157,99,.1);
-  --warn: #b47611; --warn-soft: rgba(180,118,17,.11);
-  --bad: #cf3b34; --bad-soft: rgba(207,59,52,.09);
-  --shadow: 0 1px 2px rgba(16,20,32,.06), 0 8px 24px -14px rgba(16,20,32,.14);
+  --bg: #f5f5f5; --surface: #ffffff; --surface-2: #f0f0f0; --raise: #ffffff;
+  --line: #e5e5e5; --line-soft: #efefef;
+  --ink: #0a0a0a; --ink-2: #525252; --ink-3: #737373;
+  --accent: #171717; --accent-ink: #fafafa; --accent-soft: rgba(0,0,0,.06);
+  --ok: #16a34a; --ok-soft: rgba(22,163,74,.10);
+  --warn: #d97706; --warn-soft: rgba(217,119,6,.11);
+  --bad: #dc2626; --bad-soft: rgba(220,38,38,.09);
+  --shadow: 0 1px 2px rgba(0,0,0,.05);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 [hidden] { display: none !important; }
