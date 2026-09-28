@@ -94,6 +94,7 @@ jobs:
         run: |
           python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); o=struct.unpack_from("<I",d,0x3c)[0]; s=struct.unpack_from("<H",d,o+0x5c)[0]; print(sys.argv[1],"subsystem",s); raise SystemExit(0 if s==int(sys.argv[2]) else 1)' wb2api.exe 3
           python3 -c 'import struct,sys; d=open(sys.argv[1],"rb").read(); o=struct.unpack_from("<I",d,0x3c)[0]; s=struct.unpack_from("<H",d,o+0x5c)[0]; print(sys.argv[1],"subsystem",s); raise SystemExit(0 if s==int(sys.argv[2]) else 1)' wb2api-tray.exe 2
+          grep -aq "Microsoft.Windows.Common-Controls" wb2api-tray.exe
 
       - name: 打包（windows=zip 四件套，其余=tar.gz）
         run: |

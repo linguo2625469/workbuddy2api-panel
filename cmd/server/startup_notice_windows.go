@@ -2,11 +2,15 @@
 
 package main
 
+//go:generate windres -i wb2api.rc -o wb2api_windows_amd64.syso -O coff
+
 import (
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -20,38 +24,43 @@ const (
 
 var taskDialogIndirect = windows.NewLazySystemDLL("comctl32.dll").NewProc("TaskDialogIndirect")
 
-type taskDialogButton struct {
-	ID   int32
-	Text *uint16
+type packedTaskDialog struct {
+	ptrSize int
+	data    []byte
 }
 
-// taskDialogConfig mirrors TASKDIALOGCONFIG. Pointer-sized union fields are
-// kept as uintptr so the layout is correct on both 32-bit and 64-bit Windows.
-type taskDialogConfig struct {
-	Size                 uint32
-	Parent               windows.HWND
-	Instance             windows.Handle
-	Flags                uint32
-	CommonButtons        uint32
-	WindowTitle          *uint16
-	MainIcon             uintptr
-	MainInstruction      *uint16
-	Content              *uint16
-	ButtonCount          uint32
-	Buttons              *taskDialogButton
-	DefaultButton        int32
-	RadioButtonCount     uint32
-	RadioButtons         *taskDialogButton
-	DefaultRadioButton   int32
-	VerificationText     *uint16
-	ExpandedInformation  *uint16
-	ExpandedControlText  *uint16
-	CollapsedControlText *uint16
-	FooterIcon           uintptr
-	Footer               *uint16
-	Callback             uintptr
-	CallbackData         uintptr
-	Width                uint32
+func newPackedTaskDialog() *packedTaskDialog {
+	return &packedTaskDialog{ptrSize: int(unsafe.Sizeof(uintptr(0)))}
+}
+
+func (p *packedTaskDialog) uint32(v uint32) {
+	var raw [4]byte
+	binary.LittleEndian.PutUint32(raw[:], v)
+	p.data = append(p.data, raw[:]...)
+}
+
+func (p *packedTaskDialog) int32(v int32) {
+	p.uint32(uint32(v))
+}
+
+func (p *packedTaskDialog) pointer(v uintptr) {
+	if p.ptrSize == 8 {
+		var raw [8]byte
+		binary.LittleEndian.PutUint64(raw[:], uint64(v))
+		p.data = append(p.data, raw[:]...)
+		return
+	}
+	var raw [4]byte
+	binary.LittleEndian.PutUint32(raw[:], uint32(v))
+	p.data = append(p.data, raw[:]...)
+}
+
+func utf16Pointer(value string) (*uint16, error) {
+	ptr, err := windows.UTF16PtrFromString(value)
+	if err != nil {
+		return nil, err
+	}
+	return ptr, nil
 }
 
 func startupNoticeMarkerPath() (string, error) {
@@ -99,44 +108,92 @@ func showStartupNotice() {
 	}
 	if err := persistStartupNoticeChoice(marker, true); err != nil {
 		log.Printf("启动提示: 保存“不再显示”设置失败: %v", err)
+		return
 	}
+	log.Printf("启动提示: 已创建 %s，后续启动不再显示", marker)
 }
 
 func showStartupTaskDialog() (bool, error) {
 	if err := taskDialogIndirect.Find(); err != nil {
 		return false, err
 	}
-	title, _ := windows.UTF16PtrFromString("WorkBuddy2API 已启动")
-	instruction, _ := windows.UTF16PtrFromString("程序已成功运行")
-	content, _ := windows.UTF16PtrFromString("WorkBuddy2API 已在系统托盘中运行。\n\n右键点击托盘图标，选择“打开Panel”即可进入管理界面。")
-	verification, _ := windows.UTF16PtrFromString("以后不再显示此提示")
-	buttonText, _ := windows.UTF16PtrFromString("确定")
-	buttons := []taskDialogButton{{ID: startupNoticeButtonID, Text: buttonText}}
-	config := taskDialogConfig{
-		Parent:           0,
-		Flags:            taskDialogSizeToContent,
-		WindowTitle:      title,
-		MainInstruction:  instruction,
-		Content:          content,
-		ButtonCount:      1,
-		Buttons:          &buttons[0],
-		DefaultButton:    startupNoticeButtonID,
-		VerificationText: verification,
+	title, err := utf16Pointer("WorkBuddy2API 已启动")
+	if err != nil {
+		return false, err
 	}
-	config.Size = uint32(unsafe.Sizeof(config))
+	instruction, err := utf16Pointer("程序已成功运行")
+	if err != nil {
+		return false, err
+	}
+	content, err := utf16Pointer("WorkBuddy2API 已在系统托盘中运行。\n\n右键点击托盘图标，选择“打开Panel”即可进入管理界面。")
+	if err != nil {
+		return false, err
+	}
+	verification, err := utf16Pointer("以后不再显示此提示")
+	if err != nil {
+		return false, err
+	}
+	buttonText, err := utf16Pointer("确定")
+	if err != nil {
+		return false, err
+	}
 
+	config, button := buildStartupTaskDialog(title, instruction, content, verification, buttonText)
 	var selectedButton int32
 	var checked int32
 	ret, _, _ := taskDialogIndirect.Call(
-		uintptr(unsafe.Pointer(&config)),
+		uintptr(unsafe.Pointer(&config.data[0])),
 		uintptr(unsafe.Pointer(&selectedButton)),
 		0,
 		uintptr(unsafe.Pointer(&checked)),
 	)
+	runtime.KeepAlive(config)
+	runtime.KeepAlive(button)
+	runtime.KeepAlive(title)
+	runtime.KeepAlive(instruction)
+	runtime.KeepAlive(content)
+	runtime.KeepAlive(verification)
+	runtime.KeepAlive(buttonText)
 	if ret != 0 {
 		return false, fmt.Errorf("TaskDialogIndirect HRESULT=0x%08X", uint32(ret))
 	}
 	return selectedButton == startupNoticeButtonID && checked != 0, nil
+}
+
+func buildStartupTaskDialog(
+	title, instruction, content, verification, buttonText *uint16,
+) (*packedTaskDialog, *packedTaskDialog) {
+	button := newPackedTaskDialog()
+	button.int32(startupNoticeButtonID)
+	button.pointer(uintptr(unsafe.Pointer(buttonText)))
+
+	config := newPackedTaskDialog()
+	config.uint32(0) // cbSize，最后回填
+	config.pointer(0)
+	config.pointer(0)
+	config.uint32(taskDialogSizeToContent)
+	config.uint32(0)
+	config.pointer(uintptr(unsafe.Pointer(title)))
+	config.pointer(0)
+	config.pointer(uintptr(unsafe.Pointer(instruction)))
+	config.pointer(uintptr(unsafe.Pointer(content)))
+	config.uint32(1)
+	config.pointer(uintptr(unsafe.Pointer(&button.data[0])))
+	config.int32(startupNoticeButtonID)
+	config.uint32(0)
+	config.pointer(0)
+	config.int32(0)
+	config.pointer(uintptr(unsafe.Pointer(verification)))
+	config.pointer(0)
+	config.pointer(0)
+	config.pointer(0)
+	config.pointer(0)
+	config.pointer(0)
+	config.pointer(0)
+	config.pointer(0)
+	config.uint32(0)
+	binary.LittleEndian.PutUint32(config.data[:4], uint32(len(config.data)))
+	return config, button
 }
 
 func showStartupNoticeMessageBox() {

@@ -3,9 +3,11 @@
 package main
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 )
 
 func TestStartupNoticeMarkerPath(t *testing.T) {
@@ -50,5 +52,21 @@ func TestStartupNoticeMarkerLifecycle(t *testing.T) {
 func TestPersistStartupNoticeChoiceFailure(t *testing.T) {
 	if err := persistStartupNoticeChoice(t.TempDir(), true); err == nil {
 		t.Fatal("writing marker over a directory succeeded")
+	}
+}
+
+func TestTaskDialogPackedLayout(t *testing.T) {
+	config, button := buildStartupTaskDialog(nil, nil, nil, nil, nil)
+	ptrSize := int(unsafe.Sizeof(uintptr(0)))
+	wantConfigSize := 32 + 16*ptrSize
+	wantButtonSize := 4 + ptrSize
+	if len(config.data) != wantConfigSize {
+		t.Fatalf("config size = %d, want %d", len(config.data), wantConfigSize)
+	}
+	if len(button.data) != wantButtonSize {
+		t.Fatalf("button size = %d, want %d", len(button.data), wantButtonSize)
+	}
+	if got := binary.LittleEndian.Uint32(config.data[:4]); got != uint32(wantConfigSize) {
+		t.Fatalf("cbSize = %d, want %d", got, wantConfigSize)
 	}
 }

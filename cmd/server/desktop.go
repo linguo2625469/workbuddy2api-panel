@@ -39,8 +39,11 @@ func newLogSinks() (*logSinks, error) {
 		return nil, err
 	}
 	s.closer = file
-	s.system = io.MultiWriter(file, os.Stderr)
-	s.chat = io.MultiWriter(file, os.Stdout)
+	// The GUI subsystem has no reliable console handles. Writing to an invalid
+	// os.Stdout/os.Stderr would make io.MultiWriter stop before reaching later
+	// sinks, so the tray build uses the daily file as its only base sink.
+	s.system = file
+	s.chat = file
 	return s, nil
 }
 
@@ -52,11 +55,23 @@ func (s *logSinks) attachPanel(p *panel.Panel) {
 	system := s.system
 	chat := s.chat
 	if p != nil {
-		system = io.MultiWriter(system, p.Logs())
-		chat = io.MultiWriter(chat, p.Logs())
+		system = panelMirror(p.Logs(), system)
+		chat = panelMirror(p.Logs(), chat)
 	}
 	log.SetOutput(system)
 	server.SetChatLogOutput(chat)
+}
+
+// panelMirror writes to the in-memory Panel ring before the file/console sink.
+// A broken external handle must not prevent the log from reaching the Panel.
+func panelMirror(ring, sink io.Writer) io.Writer {
+	if ring == nil {
+		return sink
+	}
+	if sink == nil {
+		return ring
+	}
+	return io.MultiWriter(ring, sink)
 }
 
 func (s *logSinks) Close() error {

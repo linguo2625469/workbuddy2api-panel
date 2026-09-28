@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+    name="WorkBuddy2API.Panel"
+    processorArchitecture="*"
+    type="win32"
+    version="1.0.0.0"
+  />
+  <description>WorkBuddy2API Panel</description>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        language="*"
+        name="Microsoft.Windows.Common-Controls"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        type="win32"
+        version="6.0.0.0"
+      />
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>
