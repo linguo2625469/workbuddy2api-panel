@@ -1,8 +1,12 @@
 package panel
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -17,7 +21,8 @@ func TestSecurityHeadersOnAllPanelResponses(t *testing.T) {
 	p := newTestPanel()
 	paths := []struct{ method, path string }{
 		{"GET", "/panel/"},
-		{"GET", "/panel/app.js"},
+		{"GET", "/panel/theme-init.js"},
+		{"GET", "/panel/assets/nonexistent.js"}, // 404
 		{"GET", "/panel/api/overview"}, // 401（未提供 key）
 		{"POST", "/panel/api/config"},  // 401
 		{"GET", "/panel/api/nonexistent"},
@@ -63,35 +68,82 @@ func TestCSPDisallowsInlineScriptAndFraming(t *testing.T) {
 	}
 }
 
-// 页面必须引用外部脚本（内联脚本会被上面的 CSP 拦掉，页面将完全不可用）。
+// 页面必须以同源外链加载入口模块（内联脚本会被上面的 CSP 拦掉，页面将完全不可用）。
 func TestIndexReferencesExternalScript(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `<script src="app.js"></script>`) {
-		t.Error("index.html must load app.js externally (inline script is blocked by CSP)")
+	if !strings.Contains(body, `<script type="module" crossorigin src="/panel/assets/`) {
+		t.Error("index.html must load the entry module from /panel/assets/ (inline script is blocked by CSP)")
 	}
 	// 反例保护：出现内联 <script>...</script> 内容块即为回归
 	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
 		t.Error("index.html still contains an inline <script> block; CSP would block it")
 	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("index Cache-Control=%q want no-cache（发版后要立刻拿到新文件名）", cc)
+	}
 }
 
-// app.js 必须能作为同源脚本取到且类型正确（否则页面白屏）。
-func TestAppScriptServed(t *testing.T) {
+// 页面引用的每个脚本和样式都必须能取到、类型正确（否则白屏），并且可长缓存、支持 gzip。
+func TestIndexAssetsServed(t *testing.T) {
 	p := newTestPanel()
-	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/app.js", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("code=%d want 200", rec.Code)
+	refs := regexp.MustCompile(`(?:src|href)="(/panel/[^"]+)"`).FindAllStringSubmatch(string(indexHTML), -1)
+	if len(refs) < 3 {
+		t.Fatalf("index.html 引用的资源太少（%d 个），dist 可能不完整", len(refs))
 	}
-	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
-		t.Errorf("Content-Type=%q want javascript", ct)
+	for _, m := range refs {
+		url := m[1]
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: code=%d want 200", url, rec.Code)
+			continue
+		}
+		ct := rec.Header().Get("Content-Type")
+		switch {
+		case strings.HasSuffix(url, ".js") && !strings.Contains(ct, "javascript"),
+			strings.HasSuffix(url, ".css") && !strings.Contains(ct, "text/css"):
+			t.Errorf("%s: Content-Type=%q", url, ct)
+		}
+		if strings.HasPrefix(url, "/panel/assets/") && !strings.Contains(rec.Header().Get("Cache-Control"), "immutable") {
+			t.Errorf("%s: Cache-Control=%q want immutable", url, rec.Header().Get("Cache-Control"))
+		}
+
+		// 同一资源的 gzip 版本解压后必须与原文一致
+		req := httptest.NewRequest("GET", url, nil)
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		gz := httptest.NewRecorder()
+		p.ServeHTTP(gz, req)
+		if rec.Body.Len() < 1024 {
+			continue
+		}
+		if gz.Header().Get("Content-Encoding") != "gzip" {
+			t.Errorf("%s: 未返回 gzip", url)
+			continue
+		}
+		zr, err := gzip.NewReader(gz.Body)
+		if err != nil {
+			t.Fatalf("%s: %v", url, err)
+		}
+		plain, err := io.ReadAll(zr)
+		if err != nil || !bytes.Equal(plain, rec.Body.Bytes()) {
+			t.Errorf("%s: gzip 解压结果与原文不一致（err=%v）", url, err)
+		}
 	}
-	if !strings.Contains(rec.Body.String(), "'use strict'") {
-		t.Error("app.js body looks wrong")
+}
+
+// 资源路由只认 assets/ 下的真实文件：不存在的和路径穿越都 404。
+func TestAssetNotFound(t *testing.T) {
+	p := newTestPanel()
+	for _, u := range []string{"/panel/assets/nope.js", "/panel/assets/..%2findex.html", "/panel/app.js"} {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest("GET", u, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s: code=%d want 404", u, rec.Code)
+		}
 	}
 }
 

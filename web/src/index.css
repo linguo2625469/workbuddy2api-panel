@@ -1,0 +1,35 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+@custom-variant dark (&:is(.dark *));
+
+/* 标签（Chip）是短词，表格列被挤窄时也不要把「限流冷却 · 7分04秒」折成几行 */
+@layer components {
+  .chip { white-space: nowrap; }
+}
+
+/* 图表分类色：dataviz 参考色板的 8 个槽位，固定顺序分配、不循环（第 9 个起归入「其他」）。
+   明暗各一套，均按 HeroUI 默认主题的卡片底色（浅 #ffffff / 深 #18181b）跑过色觉与对比度校验。
+   HeroUI 默认主题只有状态色，状态色不拿来区分数据系列，所以图表单独给。 */
+:root {
+  --viz-1: #2a78d6;
+  --viz-2: #eb6834;
+  --viz-3: #1baf7a;
+  --viz-4: #eda100;
+  --viz-5: #e87ba4;
+  --viz-6: #008300;
+  --viz-7: #4a3aa7;
+  --viz-8: #e34948;
+  --viz-other: var(--muted);
+}
+.dark,
+[data-theme="dark"] {
+  --viz-1: #3987e5;
+  --viz-2: #d95926;
+  --viz-3: #199e70;
+  --viz-4: #c98500;
+  --viz-5: #d55181;
+  --viz-6: #008300;
+  --viz-7: #9085e9;
+  --viz-8: #e66767;
+}

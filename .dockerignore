@@ -16,3 +16,5 @@ PLAN.md
 SPEC.md
 LOOP.md
 README.md
+# 面板前端源码与依赖不进镜像：构建产物已提交在 internal/panel/dist，go build 只需要它
+web/

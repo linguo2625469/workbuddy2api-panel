@@ -20,6 +20,9 @@ config.json
 *.tmp
 __pycache__/
 
+# 面板前端（web/）的依赖目录。构建产物 internal/panel/dist 是有意提交的，不要忽略
+web/node_modules/
+
 # Backups (contains auth tokens)
 backups/
 
