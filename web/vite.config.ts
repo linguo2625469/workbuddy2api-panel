@@ -2,9 +2,9 @@ import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-// 构建输出到 Go 的嵌入目录（internal/panel/dist），产物提交进仓库：
-// 只装了 Go 的用户照样 go build 就能得到完整面板。改了 web/ 必须重新 npm run build 并一起提交，
-// CI 会重新构建并比对，不一致就报错。
+// 构建输出到 Go 的嵌入目录（internal/panel/dist），go build 时经 go:embed 打进二进制。
+// dist 不进版本库（只有 .gitkeep，emptyOutDir 会清掉它，postbuild 再补回来）；
+// Docker 镜像与 CI 发布的二进制会先构建前端，本地要先 npm run build 再 go build。
 export default defineConfig({
   base: '/panel/',
   plugins: [react(), tailwindcss()],

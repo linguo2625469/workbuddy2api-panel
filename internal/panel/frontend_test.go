@@ -7,7 +7,8 @@ import (
 )
 
 // 前端逻辑（积分包分组、到期汇总、配置表单、账号状态等）的单元测试在 web/src/lib/*.test.ts，
-// 由 vitest 运行（CI 的 panel-web 任务）；这里只测 Go 端嵌入的页面。
+// 由 vitest 运行（npm run build 的一部分，CI 在 go-binaries 的 web 任务里跑）；这里只测 Go 端输出的页面。
+// 本测试在前端已构建（真实 index.html）和未构建（构建指引页）两种状态下都要成立。
 
 // TestIndexHTMLNoInlineScript index.html 不得含内联 <script> 块：
 // 严格 CSP（script-src 'self'）会拦截内联脚本，页面将完全不可用。

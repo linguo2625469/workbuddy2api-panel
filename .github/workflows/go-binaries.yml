@@ -1,6 +1,7 @@
 name: go-binaries
 
 # 可运行二进制构建/发布：
+#   - 先构建面板前端（web/ → internal/panel/dist，含类型检查 / ESLint / 单元测试），产物供后续任务 go:embed
 #   - PR / push main → 测试 + 五平台编译验证（产物仅存 artifact，不发布）
 #   - push v* tag    → 同上 + 打包上传到 GitHub Release（zip/tar.gz + checksums）
 # 固化的发布纪律（曾两次人祸，见仓库 HANDOFF）：-s -w 剥离、二进制版本串 == 源码
@@ -16,6 +17,7 @@ on:
       - "cmd/**"
       - "internal/**"
       - "config.example.json"
+      - "web/**"
       - ".github/workflows/go-binaries.yml"
   workflow_dispatch:
 
@@ -27,18 +29,44 @@ permissions:
   contents: read
 
 jobs:
+  # 面板前端：构建一次，产物上传给 test / build 共用（dist 不进版本库）
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build   # 类型检查 + ESLint（零警告）+ 单元测试 + 构建到 ../internal/panel/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: panel-dist
+          path: internal/panel/dist
+          retention-days: 7
+
   test:
+    needs: web
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: panel-dist
+          path: internal/panel/dist
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      # 面板前端的检查（类型 / ESLint / 单元测试 / 产物一致性）在 panel-web.yml；这里只跑 Go 测试
+      # 前端产物已就位：面板包的 TestBuiltDistIsServable 会真实校验页面引用的每个资源
       - run: go test ./...
 
   build:
-    needs: test
+    needs: [web, test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -51,6 +79,10 @@ jobs:
           - { goos: darwin, goarch: arm64, ext: .tar.gz }
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: panel-dist
+          path: internal/panel/dist
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -75,6 +107,16 @@ jobs:
             exit 1
           fi
           echo "version assert OK: ${{ steps.ver.outputs.v }}"
+
+      # 面板断言：发布的二进制必须带面板前端（dist 为空时 go build 也能通过，只会显示「前端还没有构建」）
+      - name: 断言二进制包含面板前端
+        run: |
+          BIN="wb2api${{ matrix.goos == 'windows' && '.exe' || '' }}"
+          if ! grep -qa 'src="/panel/assets/' "$BIN"; then
+            echo "::error::binary does not embed the panel frontend (internal/panel/dist was empty)"
+            exit 1
+          fi
+          echo "panel assert OK"
 
       - name: 打包（windows=zip 三件套，其余=tar.gz）
         run: |

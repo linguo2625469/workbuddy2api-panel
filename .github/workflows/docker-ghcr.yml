@@ -19,6 +19,7 @@ on:
       - "scripts/**"
       - "*.sh"
       - "config.example.json"
+      - "web/**"
       - ".github/workflows/docker-ghcr.yml"
   workflow_dispatch:
 

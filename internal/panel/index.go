@@ -1,9 +1,12 @@
 // index.go 面板静态资源与安全响应头。
 //
-// 前端源码在仓库根目录 web/（React + HeroUI），构建产物输出到本目录的 dist/ 并提交进仓库，
-// 经 go:embed 打进二进制：只装了 Go 的用户照样 go build 就能得到完整面板。
-// 改了 web/ 必须重新 npm run build 并把 dist/ 一起提交（CI 会重新构建并比对）。
+// 前端源码在仓库根目录 web/（React + HeroUI），构建产物输出到本目录的 dist/，经 go:embed 打进二进制。
+// dist/ 不进版本库（只留一个 .gitkeep，让没有产物时 go:embed 也能通过编译）：
+//   - 本地开发：先 cd web && npm ci && npm run build，再 go build / go run（需要 Node.js 22+）；
+//   - Docker 镜像和 CI 发布的二进制：构建流程里自动先构建前端，不用手动做；
+//   - 没构建前端就编译也能通过，只是面板页面会显示「前端还没有构建」的提示，网关与 /panel/api/* 不受影响。
 //
+// dist 的结构：
 //   - dist/index.html      页面骨架（无内联脚本）
 //   - dist/theme-init.js   首屏前套上明暗主题
 //   - dist/assets/*        打包后的脚本与样式，文件名带内容哈希，可永久缓存
@@ -22,21 +25,18 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 //go:embed all:dist
-var distFS embed.FS
+var distEmbed embed.FS
 
-// indexHTML 页面骨架（dist 缺失时编译期就会失败，这里不会读不到）。
-var indexHTML = mustReadDist("index.html")
-
-func mustReadDist(name string) []byte {
-	b, err := distFS.ReadFile("dist/" + name)
-	if err != nil {
-		panic("panel: 前端产物缺失 dist/" + name + "：在 web/ 下运行 npm run build 后重新编译")
+// embeddedDist 返回嵌入的前端产物（dist/ 之内）。
+func embeddedDist() fs.FS {
+	sub, err := fs.Sub(distEmbed, "dist")
+	if err != nil { // 只有路径非法才会出错，"dist" 是常量，不会发生
+		panic(err)
 	}
-	return b
+	return sub
 }
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
@@ -64,17 +64,60 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }
 
+// notBuiltHTML 前端产物缺失时的提示页（编译时没先构建前端）。纯静态、无脚本，CSP 下可正常显示。
+const notBuiltHTML = `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>面板前端还没有构建</title>
+<style>
+body{font:15px/1.7 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;max-width:40rem;margin:12vh auto;padding:0 1rem;color:#222;background:#fff}
+code,pre{background:#f0f0f0;border-radius:6px}code{padding:.1em .4em}pre{padding:.8em 1em;overflow:auto}
+@media(prefers-color-scheme:dark){body{color:#e4e4e7;background:#18181b}code,pre{background:#27272a}}
+</style>
+</head>
+<body>
+<h1>面板前端还没有构建</h1>
+<p>这个二进制编译时没有带上面板前端（<code>internal/panel/dist</code> 是空的）。网关本身与 <code>/panel/api/*</code> 接口不受影响。</p>
+<p>在源码目录里构建前端（需要 Node.js 22+），然后重新编译：</p>
+<pre>cd web
+npm ci
+npm run build
+cd ..
+go build ./cmd/server</pre>
+<p>官方发布的二进制和 Docker 镜像已经包含面板，不需要这一步。</p>
+</body>
+</html>
+`
+
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
 // 不缓存：发版后浏览器要立刻拿到引用新哈希文件名的页面。
+// 前端产物缺失时返回 503 + 构建指引，而不是空白页或 panic。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
+	b, err := fs.ReadFile(p.assets, "index.html")
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write([]byte(notBuiltHTML))
+		}
+		return
+	}
 	w.Header().Set("Cache-Control", "no-cache")
-	serveBytes(w, r, "index.html", indexHTML)
+	p.serveBytes(w, r, "index.html", b)
 }
 
 // themeInit 首屏主题脚本（文件名不带哈希，不做长缓存）。
 func (p *Panel) themeInit(w http.ResponseWriter, r *http.Request) {
+	b, err := fs.ReadFile(p.assets, "theme-init.js")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-cache")
-	serveBytes(w, r, "theme-init.js", mustReadDist("theme-init.js"))
+	p.serveBytes(w, r, "theme-init.js", b)
 }
 
 // asset 输出打包后的脚本与样式。文件名带内容哈希，可永久缓存。
@@ -84,13 +127,13 @@ func (p *Panel) asset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	b, err := distFS.ReadFile("dist/" + name)
+	b, err := fs.ReadFile(p.assets, name)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	serveBytes(w, r, name, b)
+	p.serveBytes(w, r, name, b)
 }
 
 // contentTypes 常见扩展名写死：mime.TypeByExtension 在 Windows 上读注册表，
@@ -102,12 +145,9 @@ var contentTypes = map[string]string{
 	".svg":  "image/svg+xml",
 }
 
-// gzipped 压缩结果缓存（嵌入文件内容不变，每个文件只压一次）。
-var gzipped sync.Map // name → []byte
-
 // serveBytes 按扩展名写 Content-Type；客户端接受 gzip 且文件不小时返回压缩版本
 // （打包后的脚本与样式压缩后只剩三成左右，面板常经远程 http 访问）。
-func serveBytes(w http.ResponseWriter, r *http.Request, name string, b []byte) {
+func (p *Panel) serveBytes(w http.ResponseWriter, r *http.Request, name string, b []byte) {
 	ct := contentTypes[path.Ext(name)]
 	if ct == "" {
 		ct = mime.TypeByExtension(path.Ext(name))
@@ -118,7 +158,7 @@ func serveBytes(w http.ResponseWriter, r *http.Request, name string, b []byte) {
 	w.Header().Set("Content-Type", ct)
 	w.Header().Add("Vary", "Accept-Encoding")
 	if len(b) >= 1024 && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-		b = gzipOnce(name, b)
+		b = p.gzipOnce(name, b)
 		w.Header().Set("Content-Encoding", "gzip")
 	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(b)))
@@ -128,8 +168,9 @@ func serveBytes(w http.ResponseWriter, r *http.Request, name string, b []byte) {
 	}
 }
 
-func gzipOnce(name string, b []byte) []byte {
-	if v, ok := gzipped.Load(name); ok {
+// gzipOnce 压缩结果按文件名缓存在面板实例上（嵌入文件内容不变，每个文件只压一次）。
+func (p *Panel) gzipOnce(name string, b []byte) []byte {
+	if v, ok := p.gzipped.Load(name); ok {
 		return v.([]byte)
 	}
 	var buf bytes.Buffer
@@ -137,6 +178,6 @@ func gzipOnce(name string, b []byte) []byte {
 	_, _ = zw.Write(b)
 	_ = zw.Close()
 	out := buf.Bytes()
-	gzipped.Store(name, out)
+	p.gzipped.Store(name, out)
 	return out
 }

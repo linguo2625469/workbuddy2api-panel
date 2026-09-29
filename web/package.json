@@ -9,6 +9,7 @@
     "lint": "eslint --max-warnings 0 .",
     "test": "vitest run",
     "build": "tsc -b && eslint --max-warnings 0 . && vitest run && vite build",
+    "postbuild": "node -e \"require('fs').writeFileSync('../internal/panel/dist/.gitkeep', '')\"",
     "preview": "vite preview"
   },
   "dependencies": {

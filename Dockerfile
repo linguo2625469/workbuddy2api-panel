@@ -1,9 +1,20 @@
 # syntax=docker/dockerfile:1
+# 面板前端：产物是纯静态文件、与目标平台无关，固定在构建机原生平台上构建一次
+#（多架构构建时不必在 QEMU 模拟的 arm64 里跑 Node）。npm run build 含类型检查、ESLint 与单元测试。
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web/ ./
+RUN npm run build
+
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
+# 前端产物放进 go:embed 目录（构建上下文里的 internal/panel/dist 已被 .dockerignore 排除）
+COPY --from=web /src/internal/panel/dist/ internal/panel/dist/
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \

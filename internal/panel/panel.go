@@ -3,8 +3,8 @@
 // 签到/保活，以及运行日志环形缓冲（镜像 log 包与 chat 表格日志）。
 //
 // 设计约束：
-//   - 前端源码在 web/（React + HeroUI），构建产物 dist/ 提交进仓库并 go:embed 进二进制，
-//     编译服务端只需要 Go，与二进制同体部署（见 index.go）；
+//   - 前端源码在 web/（React + HeroUI），构建产物 dist/ 不进版本库，构建时 go:embed 进二进制、
+//     与二进制同体部署；没构建前端也能编译，只是页面显示构建指引（见 index.go）；
 //   - 鉴权复用网关 api_key（Bearer），与 /v1/* 同一口径；api_key 为空 = 不鉴权
 //     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /panel/api/*；
 //   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
@@ -13,6 +13,7 @@ package panel
 
 import (
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -87,6 +88,11 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// assets 前端产物（dist/ 之内）。默认是 go:embed 的那份，测试可替换成合成的文件系统。
+	// gzipped 是按文件名缓存的压缩结果（index.go）。
+	assets  fs.FS
+	gzipped sync.Map
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -135,6 +141,7 @@ func New(cfg Config) *Panel {
 		started: time.Now(),
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
+		assets:  embeddedDist(),
 	}
 	p.routes()
 	return p

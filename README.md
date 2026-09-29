@@ -132,7 +132,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 | 能力 | 说明 |
 |---|---|
-| **Web 管理面板** | `internal/panel`，前端（`web/`，React + HeroUI）构建产物随仓库提交、go:embed 进二进制，编译只需 Go。账号池可视化（状态 / 积分量条 / 冷却倒计时 / 模型级限额 / 最早到期）、账号详情、积分到期分布、单号运维、批量任务、日志检索、明暗主题、手机端适配 |
+| **Web 管理面板** | `internal/panel`，前端（`web/`，React + HeroUI）构建后 go:embed 进二进制，Release 二进制与 Docker 镜像开箱即用。账号池可视化（状态 / 积分量条 / 冷却倒计时 / 模型级限额 / 最早到期）、账号详情、积分到期分布、单号运维、批量任务、日志检索、明暗主题、手机端适配 |
 | **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）**，替代命令行 `login.sh` 流程 |
 | **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
 | **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **17 个任务**（对话 / 领养 / 桌面行为链 / 模板 / 灵感案例 / 画布 / 专家召唤 / 技能尝鲜 / 主题 / 资料库 / 夜猫子等），推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
@@ -259,7 +259,8 @@ docker compose down             # 停止并移除容器（数据在 ./auths 与 
 ### 方式二：Windows 单文件运行（无需 Docker）
 
 ```powershell
-# 1) 下载 Release 中的 wb2api.exe，或从源码构建
+# 1) 下载 Release 中的 wb2api.exe，或从源码构建（先构建面板前端，需要 Node.js 22+）
+cd web; npm ci; npm run build; cd ..
 go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 
 # 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
@@ -274,13 +275,15 @@ exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到�
 ### 方式三：源码运行（开发调试）
 
 ```bash
+(cd web && npm ci && npm run build)   # 先构建面板前端（需要 Node.js 22+），产物进 internal/panel/dist
 go build ./...
 go vet ./...
 go test ./...                      # 完整测试套件
 go run ./cmd/server -config config.json
 ```
 
-**修改管理面板前端**（`web/`，React 19 + HeroUI v3 + Vite，需要 Node.js 22+）：构建产物输出到 `internal/panel/dist` 并**随源码一起提交**，所以只装 Go 的用户照样能编出完整面板；CI 会重新构建并比对，产物和源码不一致就报错。
+**管理面板前端**在 `web/`（React 19 + HeroUI v3 + Vite）。构建产物输出到 `internal/panel/dist`，**不进版本库**，`go build` 时经 go:embed 打进二进制；
+没构建前端也能编译通过，只是打开面板会看到「前端还没有构建」的提示（网关和 `/panel/api/*` 不受影响）。Docker 镜像和 CI 发布的二进制会自动先构建前端。
 
 ```bash
 cd web
@@ -289,7 +292,7 @@ npm run dev        # 开发服务器，/panel/api 转发到本机 :7863 的网�
 npm run build      # 类型检查 + ESLint + 单元测试 + 构建到 ../internal/panel/dist
 ```
 
-构建全部二进制：
+构建全部二进制（先按上面构建面板前端）：
 
 ```bash
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
@@ -533,7 +536,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ## 🖥️ Web 管理面板
 
-内嵌式管理面板（`internal/panel`，前端构建产物 go:embed 进二进制，编译服务端只需要 Go），服务启动后访问：
+内嵌式管理面板（`internal/panel`，前端 `web/` 构建后 go:embed 进二进制，与服务同体部署），服务启动后访问：
 
 ```
 http://127.0.0.1:7863/panel/
