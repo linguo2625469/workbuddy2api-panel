@@ -11,13 +11,21 @@ package panel
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -29,7 +37,25 @@ const (
 	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
+	phoneLoginBase      = "https://www.codebuddy.cn"
+	phoneLoginUA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+	phoneLoginTTL       = 5 * time.Minute
 )
+
+var (
+	phoneActionRE = regexp.MustCompile(`(?i)<form[^>]+action=["']([^"']+)["']`)
+	phoneRE       = regexp.MustCompile(`^1\d{10}$`)
+	phoneCodeRE   = regexp.MustCompile(`^\d{6}$`)
+)
+
+type phoneLoginSession struct {
+	created      time.Time
+	phone        string
+	actionURL    string
+	cookies      []*http.Cookie
+	userAgent    string
+	codeVerifier string
+}
 
 // loginEndpoints 按 realm 返回设备授权三端点（auth/state、token、account）+ Origin。
 // realm=="global" → 国际版（workbuddy.ai 同域）；cn/非法/缺省 → CN（零回归）。
@@ -319,4 +345,440 @@ func (p *Panel) loginRegions(w http.ResponseWriter, r *http.Request) {
 			{"code": "ID", "name": "Indonesia"},
 		},
 	})
+}
+
+// phoneSendCode 创建 Keycloak 手机号登录会话并发送短信验证码。
+func (p *Panel) phoneSendCode(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone string `json:"phone"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	phone := strings.TrimSpace(body.Phone)
+	if !validPhone(phone) {
+		writeErr(w, http.StatusBadRequest, "手机号格式错误，请输入11位手机号")
+		return
+	}
+
+	verifier, challenge, err := phonePKCE()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "生成登录会话失败: "+err.Error())
+		return
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "初始化登录会话失败: "+err.Error())
+		return
+	}
+	client := &http.Client{Timeout: 30 * time.Second, Jar: jar}
+
+	authURL, _ := url.Parse(phoneLoginBase + "/auth/realms/copilot/protocol/openid-connect/auth")
+	q := authURL.Query()
+	q.Set("client_id", "console")
+	q.Set("redirect_uri", phoneLoginBase)
+	q.Set("response_type", "code")
+	q.Set("scope", "openid profile offline_access email")
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	authURL.RawQuery = q.Encode()
+	page, status, err := phoneRequest(client, http.MethodGet, authURL.String(), nil, "text/html,application/xhtml+xml")
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, fmt.Sprintf("获取登录页面失败（上游 %d）: %v", status, err))
+		return
+	}
+	actionMatch := phoneActionRE.FindSubmatch(page)
+	if len(actionMatch) != 2 {
+		writeErr(w, http.StatusBadGateway, "登录页面缺少表单 action")
+		return
+	}
+	actionURL := strings.ReplaceAll(string(actionMatch[1]), "&amp;", "&")
+	action, err := url.Parse(actionURL)
+	if err != nil || action.Query().Get("session_code") == "" {
+		writeErr(w, http.StatusBadGateway, "登录页面缺少 session_code")
+		return
+	}
+
+	smsURL := phoneLoginBase + "/auth/realms/copilot/sms/authentication-code?phoneNumber=" + url.QueryEscape("+86"+phone)
+	smsRaw, status, err := phoneRequest(client, http.MethodGet, smsURL, nil, "application/json")
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, fmt.Sprintf("发送验证码失败（上游 %d）: %v", status, err))
+		return
+	}
+	// 短信验证码通常 60 秒失效；会话本身仍保留 5 分钟用于返回明确的过期错误。
+	expiresIn := 60
+	var sms struct {
+		ExpiresIn int `json:"expires_in"`
+	}
+	if json.Unmarshal(smsRaw, &sms) == nil && sms.ExpiresIn > 0 {
+		expiresIn = sms.ExpiresIn
+	}
+	cookies := jar.Cookies(authURL)
+	sessionID, err := randomHex(16)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "生成登录会话失败: "+err.Error())
+		return
+	}
+	p.phoneMu.Lock()
+	p.cleanupPhoneLoginsLocked(time.Now())
+	p.phoneLogins[sessionID] = phoneLoginSession{
+		created: time.Now(), phone: phone, actionURL: actionURL,
+		cookies: cookies, userAgent: phoneLoginUA, codeVerifier: verifier,
+	}
+	p.phoneMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "session_id": sessionID, "expires_in": expiresIn})
+}
+
+// phoneLogin 完成验证码登录并复用现有账号落盘/热加载逻辑。
+func (p *Panel) phoneLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Phone     string `json:"phone"`
+		Code      string `json:"code"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	phone, code, sessionID := strings.TrimSpace(body.Phone), strings.TrimSpace(body.Code), strings.TrimSpace(body.SessionID)
+	if !validPhone(phone) || !phoneCodeRE.MatchString(code) || sessionID == "" {
+		writeErr(w, http.StatusBadRequest, "手机号、验证码或登录会话无效")
+		return
+	}
+	p.phoneMu.Lock()
+	sess, ok := p.phoneLogins[sessionID]
+	if ok {
+		delete(p.phoneLogins, sessionID) // 验证码会话单次消费，防止重放
+	}
+	p.phoneMu.Unlock()
+	if !ok || time.Since(sess.created) > phoneLoginTTL || sess.phone != phone {
+		writeErr(w, http.StatusBadRequest, "登录会话不存在、已过期或手机号不匹配")
+		return
+	}
+
+	tok, err := phoneCompleteLogin(sess, code)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	acct, err := phoneAccountFromToken(tok.AccessToken, phone)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	acct, err = p.savePhoneAccount(sess, tok, acct)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"done": true, "uid": acct.UID, "nickname": acct.Nickname,
+		"credits": acct.Credits, "credits_total": acct.CreditsTotal,
+		"checkin_message": acct.CheckinMessage,
+	})
+}
+
+func validPhone(phone string) bool {
+	return phoneRE.MatchString(phone)
+}
+
+func phonePKCE() (verifier, challenge string, err error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", err
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(raw)
+	hash := sha256.Sum256([]byte(verifier))
+	return verifier, base64.RawURLEncoding.EncodeToString(hash[:]), nil
+}
+
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", b), nil
+}
+
+func (p *Panel) cleanupPhoneLoginsLocked(now time.Time) {
+	for id, sess := range p.phoneLogins {
+		if now.Sub(sess.created) > phoneLoginTTL {
+			delete(p.phoneLogins, id)
+		}
+	}
+}
+
+func phoneRequest(client *http.Client, method, target string, form url.Values, accept string) ([]byte, int, error) {
+	var body io.Reader
+	if form != nil {
+		body = strings.NewReader(form.Encode())
+	}
+	req, err := http.NewRequest(method, target, body)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("User-Agent", phoneLoginUA)
+	req.Header.Set("Accept", accept)
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if readErr != nil {
+		return nil, resp.StatusCode, readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return raw, resp.StatusCode, fmt.Errorf("上游返回 HTTP %d", resp.StatusCode)
+	}
+	return raw, resp.StatusCode, nil
+}
+
+type phoneToken struct {
+	AccessToken  string
+	RefreshToken string
+	ExpiresIn    int64
+	Domain       string
+}
+
+func phoneCompleteLogin(sess phoneLoginSession, code string) (phoneToken, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return phoneToken{}, err
+	}
+	client := &http.Client{Timeout: 30 * time.Second, Jar: jar}
+	base, _ := url.Parse(phoneLoginBase)
+	jar.SetCookies(base, sess.cookies)
+	form := url.Values{
+		"phoneNumber":    {"+86" + sess.phone},
+		"code":           {code},
+		"phoneActivated": {"true"},
+		"credentialId":   {""},
+		"login":          {"登录"},
+	}
+	req, err := http.NewRequest(http.MethodPost, sess.actionURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return phoneToken{}, err
+	}
+	req.Header.Set("User-Agent", sess.userAgent)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, err := client.Do(req)
+	if err != nil {
+		return phoneToken{}, fmt.Errorf("提交验证码失败: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if !strings.Contains(resp.Request.URL.String(), "code=") {
+		msg := "登录失败"
+		if m := regexp.MustCompile(`(?i)kc-feedback[^>]*>([^<]+)`).FindSubmatch(raw); len(m) == 2 {
+			msg = strings.TrimSpace(string(m[1]))
+		}
+		return phoneToken{}, errors.New(msg)
+	}
+	callback := resp.Request.URL.Query().Get("code")
+	if callback == "" {
+		return phoneToken{}, errors.New("登录回调缺少授权码")
+	}
+	tokenURL := phoneLoginBase + "/auth/realms/copilot/protocol/openid-connect/token"
+	redirect := phoneLoginBase
+	for _, attempt := range []struct {
+		clientID string
+		verifier string
+	}{
+		{"console", sess.codeVerifier},
+		{"console", ""},
+	} {
+		form := url.Values{
+			"grant_type":   {"authorization_code"},
+			"client_id":    {attempt.clientID},
+			"code":         {callback},
+			"redirect_uri": {redirect},
+		}
+		if attempt.verifier != "" {
+			form.Set("code_verifier", attempt.verifier)
+		}
+		raw, _, err := phoneRequest(client, http.MethodPost, tokenURL, form, "application/json")
+		if err == nil {
+			var v struct {
+				AccessToken string `json:"access_token"`
+				Refresh     string `json:"refresh_token"`
+				ExpiresIn   int64  `json:"expires_in"`
+				Domain      string `json:"domain"`
+			}
+			if json.Unmarshal(raw, &v) == nil && v.AccessToken != "" {
+				if v.ExpiresIn <= 0 {
+					v.ExpiresIn = 3600
+				}
+				return phoneToken{AccessToken: v.AccessToken, RefreshToken: v.Refresh, ExpiresIn: v.ExpiresIn, Domain: v.Domain}, nil
+			}
+		}
+	}
+	// console 客户端可能要求未公开的 client_secret；复用已登录 Cookie，
+	// 用 account 公共客户端重新取得授权码再交换 Token。
+	if acctToken, ok := phoneAccountTokenFallback(client, tokenURL); ok {
+		return acctToken, nil
+	}
+	return phoneToken{}, errors.New("登录成功但 Token 交换失败，请重新发送验证码")
+}
+
+func phoneAccountTokenFallback(client *http.Client, tokenURL string) (phoneToken, bool) {
+	verifier, challenge, err := phonePKCE()
+	if err != nil {
+		return phoneToken{}, false
+	}
+	redirect := phoneLoginBase + "/auth/realms/copilot/account/"
+	authURL, _ := url.Parse(phoneLoginBase + "/auth/realms/copilot/protocol/openid-connect/auth")
+	q := authURL.Query()
+	q.Set("client_id", "account")
+	q.Set("redirect_uri", redirect)
+	q.Set("response_type", "code")
+	q.Set("scope", "openid profile offline_access email")
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	authURL.RawQuery = q.Encode()
+	accountClient := *client
+	accountClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	req, err := http.NewRequest(http.MethodGet, authURL.String(), nil)
+	if err != nil {
+		return phoneToken{}, false
+	}
+	req.Header.Set("User-Agent", phoneLoginUA)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, err := accountClient.Do(req)
+	if err != nil {
+		return phoneToken{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound && resp.StatusCode != http.StatusSeeOther {
+		return phoneToken{}, false
+	}
+	codeURL, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		return phoneToken{}, false
+	}
+	code := codeURL.Query().Get("code")
+	if code == "" {
+		return phoneToken{}, false
+	}
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {"account"},
+		"code":          {code},
+		"redirect_uri":  {redirect},
+		"code_verifier": {verifier},
+	}
+	raw, _, err := phoneRequest(client, http.MethodPost, tokenURL, form, "application/json")
+	if err != nil {
+		return phoneToken{}, false
+	}
+	var v struct {
+		AccessToken string `json:"access_token"`
+		Refresh     string `json:"refresh_token"`
+		ExpiresIn   int64  `json:"expires_in"`
+		Domain      string `json:"domain"`
+	}
+	if json.Unmarshal(raw, &v) != nil || v.AccessToken == "" {
+		return phoneToken{}, false
+	}
+	if v.ExpiresIn <= 0 {
+		v.ExpiresIn = 3600
+	}
+	return phoneToken{AccessToken: v.AccessToken, RefreshToken: v.Refresh, ExpiresIn: v.ExpiresIn, Domain: v.Domain}, true
+}
+
+type phoneAccount struct {
+	UID            string
+	EnterpriseID   string
+	Nickname       string
+	Domain         string
+	Credits        int64
+	CreditsTotal   int64
+	CheckinMessage string
+}
+
+func phoneAccountFromToken(accessToken, phone string) (phoneAccount, error) {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return phoneAccount{}, errors.New("登录成功但 Token 不是可解析的 JWT，无法取得账号 UID")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return phoneAccount{}, errors.New("登录成功但 Token claims 无法解析")
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return phoneAccount{}, errors.New("登录成功但 Token claims 格式错误")
+	}
+	get := func(keys ...string) string {
+		for _, key := range keys {
+			if v, ok := claims[key].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+		return ""
+	}
+	uid := get("uid", "userId", "user_id", "sub")
+	if !validUID(uid) {
+		return phoneAccount{}, errors.New("登录成功但 Token 中缺少有效 UID，拒绝写入账号")
+	}
+	nickname := get("nickname", "preferred_username", "name", "username")
+	if nickname == "" {
+		nickname = maskPhone(phone)
+	}
+	domain := get("domain", "iss")
+	if strings.HasPrefix(domain, "https://") {
+		if parsed, err := url.Parse(domain); err == nil {
+			domain = parsed.Host
+		}
+	}
+	if domain == "" {
+		domain = "www.codebuddy.cn"
+	}
+	return phoneAccount{UID: uid, EnterpriseID: get("enterpriseId", "enterprise_id"), Nickname: nickname, Domain: domain}, nil
+}
+
+func maskPhone(phone string) string {
+	if len(phone) < 11 {
+		return phone
+	}
+	return phone[:3] + "****" + phone[7:]
+}
+
+func (p *Panel) savePhoneAccount(sess phoneLoginSession, tok phoneToken, acct phoneAccount) (phoneAccount, error) {
+	if err := os.MkdirAll(p.cfg.AuthDir, 0o755); err != nil {
+		return acct, fmt.Errorf("mkdir auth dir: %w", err)
+	}
+	a := &auth.Auth{
+		AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken,
+		ExpiresAt: time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second).Unix(),
+		Domain:    tok.Domain, UID: acct.UID, EnterpriseID: acct.EnterpriseID,
+		Nickname: acct.Nickname, FilePath: filepath.Join(p.cfg.AuthDir, "workbuddy-"+acct.UID+".json"),
+	}
+	if a.Domain == "" {
+		a.Domain = acct.Domain
+	}
+	if _, err := auth.BackfillRealmFor(a, "cn"); err != nil {
+		return acct, fmt.Errorf("set realm: %w", err)
+	}
+	if err := a.SaveAtomic(); err != nil {
+		return acct, fmt.Errorf("save auth: %w", err)
+	}
+	p.cfg.Pool.Add(a)
+	p.cfg.Pool.Revive(acct.UID)
+	if p.cfg.Upstream != nil {
+		if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
+			acct.CheckinMessage = err.Error()
+		}
+		if rm, tt, err := p.cfg.Upstream.UserResource(a); err == nil {
+			acct.Credits, acct.CreditsTotal = rm, tt
+			p.cfg.Pool.ReenableIfCredits(acct.UID, rm, tt)
+		}
+	}
+	log.Printf("panel: 手机号登录新账号已热加载 uid=%s nickname=%q phone=%s", acct.UID, acct.Nickname, maskPhone(sess.phone))
+	return acct, nil
 }

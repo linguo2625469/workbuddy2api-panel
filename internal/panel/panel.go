@@ -79,6 +79,11 @@ type Panel struct {
 	loginMu sync.Mutex
 	logins  map[string]loginSession
 
+	// phoneLogins 保存手机号短信登录的短期 PKCE/Cookie 会话。
+	// 与无 Cookie 的 OAuth 设备登录分开，避免两条流程相互污染。
+	phoneMu     sync.Mutex
+	phoneLogins map[string]phoneLoginSession
+
 	// taskMu/taskLocks 一键完成任务的 per-account 互斥：同一账号的任务动作
 	// （单任务 / 全量）同时只允许一条在跑。重复点击直接返回 409"仍在执行"，
 	// 而不是并发跑两遍浪费上游请求（动作虽幂等，expert 系每遍含 8 次真实对话）。
@@ -132,11 +137,12 @@ func New(cfg Config) *Panel {
 		cfg.RedisMode = "noop"
 	}
 	p := &Panel{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		started: time.Now(),
-		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		cfg:         cfg,
+		mux:         http.NewServeMux(),
+		started:     time.Now(),
+		logs:        NewRing(500),
+		logins:      map[string]loginSession{},
+		phoneLogins: map[string]phoneLoginSession{},
 	}
 	p.routes()
 	return p
@@ -156,6 +162,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
+	p.mux.HandleFunc("POST /panel/api/phone/send-code", p.withAuth(p.phoneSendCode))
+	p.mux.HandleFunc("POST /panel/api/phone/login", p.withAuth(p.phoneLogin))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))

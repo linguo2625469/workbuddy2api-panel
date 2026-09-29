@@ -5,6 +5,7 @@ let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 let logPin = true, loginState = null, loginTimer = null;
+let phoneLoginSession = null, phoneCodeTimer = null;
 let refTimer = null;
 
 const $ = id => document.getElementById(id);
@@ -644,6 +645,20 @@ $('cfgForm').onsubmit = async ev => {
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
 function openAdd() {
   $('addVeil').classList.add('on');
+  stopPhoneCodeTimer();
+  phoneLoginSession = null;
+  $('phoneLoginPhone').value = '';
+  $('phoneLoginPhone').disabled = false;
+  $('phoneLoginCode').value = '';
+  $('phoneLoginCode').hidden = true;
+  $('phoneLoginLoad').hidden = true;
+  $('phoneLoginHint').hidden = true;
+  $('phoneLoginErr').hidden = true;
+  $('phoneLoginDone').hidden = true;
+  $('btnSendPhoneCode').disabled = false;
+  $('btnSendPhoneCode').hidden = false;
+  $('btnSendPhoneCode').textContent = '发送验证码';
+  $('btnPhoneLogin').disabled = false;
   // 重置到登录标签
   switchAddTab('login');
   $('addPick').hidden = false;
@@ -657,7 +672,13 @@ function openAdd() {
 function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabLogin').hidden = tab !== 'login';
+  $('addTabPhone').hidden = tab !== 'phone';
   $('addTabImport').hidden = tab !== 'import';
+  const loginTab = tab === 'login', phoneTab = tab === 'phone';
+  $('btnStartLogin').hidden = !loginTab || !!loginState;
+  $('btnCopyUrl').hidden = !loginTab || !loginState;
+  $('btnOpenUrl').hidden = !loginTab || !loginState;
+  $('btnPhoneLogin').hidden = !phoneTab || $('phoneLoginCode').hidden;
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
@@ -682,6 +703,108 @@ function startAddLogin() {
   });
 }
 function stopPoll() { if (loginTimer) { clearInterval(loginTimer); loginTimer = null; } }
+function stopPhoneCodeTimer() {
+  if (phoneCodeTimer) { clearInterval(phoneCodeTimer); phoneCodeTimer = null; }
+}
+function startPhoneCodeTimer(seconds) {
+  stopPhoneCodeTimer();
+  let left = Math.max(1, Number(seconds) || 60);
+  const btn = $('btnSendPhoneCode');
+  btn.disabled = true;
+  btn.textContent = left + ' 秒后重发';
+  phoneCodeTimer = setInterval(() => {
+    left -= 1;
+    if (left <= 0) {
+      stopPhoneCodeTimer();
+      btn.disabled = false;
+      btn.textContent = '重新发送';
+      return;
+    }
+    btn.textContent = left + ' 秒后重发';
+  }, 1000);
+}
+async function sendPhoneCode() {
+  const input = $('phoneLoginPhone');
+  const phone = input.value.trim();
+  $('phoneLoginErr').hidden = true;
+  if (!/^1\d{10}$/.test(phone)) {
+    input.classList.add('invalid');
+    $('phoneLoginErr').hidden = false;
+    $('phoneLoginErr').textContent = '请输入 11 位手机号';
+    input.focus();
+    return;
+  }
+  input.classList.remove('invalid');
+  const btn = $('btnSendPhoneCode');
+  btn.disabled = true;
+  $('phoneLoginLoad').hidden = false;
+  $('phoneLoginHint').hidden = true;
+  try {
+    const r = await api('phone/send-code', {
+      method: 'POST', body: JSON.stringify({ phone })
+    });
+    if (r.ok === false || r.success === false) throw new Error(r.message || '验证码发送失败');
+    phoneLoginSession = r.session_id || r.sessionId || '';
+    if (!phoneLoginSession) throw new Error('验证码会话创建失败，请重试');
+    input.disabled = true;
+    $('phoneLoginCode').hidden = false;
+    $('phoneLoginCode').focus();
+    $('phoneLoginHint').hidden = false;
+    $('phoneLoginHint').textContent = '验证码已发送，请输入收到的 6 位验证码。';
+    startPhoneCodeTimer(r.expires_in || 60);
+    $('btnPhoneLogin').hidden = false;
+  } catch (e) {
+    input.disabled = false;
+    btn.disabled = false;
+    btn.textContent = '发送验证码';
+    $('phoneLoginErr').hidden = false;
+    $('phoneLoginErr').textContent = e.message;
+  } finally {
+    $('phoneLoginLoad').hidden = true;
+  }
+}
+async function completePhoneLogin() {
+  const phone = $('phoneLoginPhone').value.trim();
+  const code = $('phoneLoginCode').value.trim();
+  const btn = $('btnPhoneLogin');
+  $('phoneLoginErr').hidden = true;
+  if (!phoneLoginSession) {
+    $('phoneLoginErr').hidden = false;
+    $('phoneLoginErr').textContent = '请先发送验证码';
+    return;
+  }
+  if (!/^\d{6}$/.test(code)) {
+    $('phoneLoginErr').hidden = false;
+    $('phoneLoginErr').textContent = '请输入 6 位数字验证码';
+    $('phoneLoginCode').focus();
+    return;
+  }
+  btn.disabled = true;
+  $('phoneLoginHint').hidden = false;
+  $('phoneLoginHint').textContent = '正在完成登录，请稍候…';
+  try {
+    const r = await api('phone/login', {
+      method: 'POST', body: JSON.stringify({ phone, code, session_id: phoneLoginSession })
+    });
+    if (r.ok === false || r.success === false || r.done === false) {
+      throw new Error(r.message || '手机号登录失败');
+    }
+    stopPhoneCodeTimer();
+    $('phoneLoginDone').hidden = false;
+    const name = r.nickname || r.uid || phone;
+    const credits = Number.isFinite(Number(r.credits)) && Number(r.credits) >= 0
+      ? ' · 积分 ' + r.credits + (Number(r.credits_total) > 0 ? '/' + r.credits_total : '') : '';
+    $('phoneLoginDone').textContent = '已添加 ' + name + credits + '，账号已载入池中' + (r.checkin_message ? '；' + r.checkin_message : '');
+    $('phoneLoginCode').hidden = true;
+    $('btnPhoneLogin').hidden = true;
+    $('btnSendPhoneCode').hidden = true;
+    setTimeout(() => { closeAdd(); loadOverview(true); }, 1600);
+  } catch (e) {
+    btn.disabled = false;
+    $('phoneLoginErr').hidden = false;
+    $('phoneLoginErr').textContent = e.message;
+  }
+}
 async function pollLogin() {
   if (!loginState) return;
   try {
@@ -700,9 +823,11 @@ async function pollLogin() {
     $('addErr').textContent = e.message + '（关闭后重新添加）';
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
+function closeAdd() { stopPoll(); stopPhoneCodeTimer(); loginState = null; phoneLoginSession = null; $('addVeil').classList.remove('on'); }
 $('btnCloseAdd').onclick = closeAdd;
 $('btnStartLogin').onclick = startAddLogin;
+$('btnSendPhoneCode').onclick = sendPhoneCode;
+$('btnPhoneLogin').onclick = completePhoneLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));

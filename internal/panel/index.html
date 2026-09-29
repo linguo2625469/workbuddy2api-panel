@@ -339,6 +339,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 }
 .state { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .state.ok { color: var(--ok); } .state.err { color: var(--bad); }
+.phone-form { display: grid; gap: 12px; }
+.phone-code-row { display: flex; gap: 8px; align-items: center; }
+.phone-code-row input { flex: 1; }
+.phone-code-row button { white-space: nowrap; min-width: 108px; }
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: .3; } 100% { opacity: 1; } }
 
@@ -984,6 +988,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <h3>添加账号</h3>
       <div class="tabs" id="addTabs">
         <button class="tab on" data-tab="login">浏览器登录</button>
+        <button class="tab" data-tab="phone">手机号登录</button>
         <button class="tab" data-tab="import">导入 JSON</button>
       </div>
     </header>
@@ -1007,6 +1012,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div id="addDone" class="state ok" hidden></div>
         <div id="addErr" class="state err" hidden></div>
       </div>
+      <!-- 手机号登录 -->
+      <div id="addTabPhone" class="tab-panel" hidden>
+        <div class="phone-form">
+          <label class="fld" style="margin-bottom:0">
+            <span class="lb">手机号</span>
+            <input id="phoneLoginPhone" inputmode="numeric" autocomplete="tel" maxlength="11" placeholder="请输入 11 位手机号">
+            <span class="hint">验证码将发送到该手机号，登录后账号会自动加入账号池。</span>
+          </label>
+          <div class="phone-code-row">
+            <input id="phoneLoginCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6 位验证码" hidden>
+            <button id="btnSendPhoneCode" class="primary" type="button">发送验证码</button>
+          </div>
+          <div id="phoneLoginLoad" class="state" hidden><span class="dots">正在发送验证码</span></div>
+          <div id="phoneLoginHint" class="hint" hidden></div>
+          <div id="phoneLoginErr" class="state err" hidden></div>
+        </div>
+        <div id="phoneLoginDone" class="state ok" hidden></div>
+      </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
         <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
@@ -1020,6 +1043,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button id="btnStartLogin" class="primary">获取授权链接</button>
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
+      <button id="btnPhoneLogin" class="primary" hidden>完成手机号登录</button>
       <button id="btnCloseAdd">关闭</button>
     </footer>
   </div>
