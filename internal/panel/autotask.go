@@ -344,6 +344,12 @@ func (p *Panel) runMPMiniChatTask(a *auth.Auth, code string, withActivityId bool
 		if !p.acceptWithVerifyMP(a, code) {
 			return "accept 未登记生效（上游 200+OK 但未落账形态），待下次重试", nil
 		}
+		// accept 前的任务进度为 null（target 下发 0），兜底 target=1 会少报——
+		// Tasks_6 首轮实测：accept 后真实 target=10，只补 1 条就误判达标去领奖
+		// （claim 400 task not completed）。接受后回读一次拿真实 target/current。
+		if t2, err := p.taskByCodeMP(a, code); err == nil && t2 != nil {
+			t = t2
+		}
 	}
 	// 已达标（含 completed 未领）：直接领奖。
 	target := t.Target
