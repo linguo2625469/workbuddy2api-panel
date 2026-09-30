@@ -48,6 +48,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 		obj["stream_options"] = map[string]any{"include_usage": true}
 	}
 	normalizeToolChoice(obj)
+	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
 	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
@@ -330,5 +331,60 @@ func normalizeToolChoice(obj map[string]any) {
 		}
 	default:
 		delete(obj, "tool_choice")
+	}
+}
+
+// normalizeToolPatterns 归一化 tools 子树里 pattern 的非标准转义 `\_`（→ `_`）。
+//
+// 上游对工具 JSON Schema 的正则语法校验严格拒绝 `\_`，会返回
+// 400 code=11129 invalid_function_call_parameters。主流正则引擎将其视为
+// 普通下划线，因此只在工具 schema 内做无损归一化；消息正文等普通字符串不修改。
+func normalizeToolPatterns(obj map[string]any) {
+	rawTools, ok := obj["tools"].([]any)
+	if !ok {
+		return
+	}
+	for _, raw := range rawTools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		// OpenAI 形态 tools[].function.parameters；兼容裸 tools[].parameters。
+		if fn, ok := tool["function"].(map[string]any); ok {
+			unescapePatternLiteralEscapes(fn["parameters"])
+		}
+		unescapePatternLiteralEscapes(tool["parameters"])
+	}
+}
+
+// unescapePatternLiteralEscapes 递归改写 schema 树里的 pattern 值与
+// patternProperties 键中的 `\_`。patternProperties 的键无法原地修改，命中时重建。
+func unescapePatternLiteralEscapes(node any) {
+	switch n := node.(type) {
+	case map[string]any:
+		if p, ok := n["pattern"].(string); ok && strings.Contains(p, `\_`) {
+			n["pattern"] = strings.ReplaceAll(p, `\_`, `_`)
+		}
+		if props, ok := n["patternProperties"].(map[string]any); ok {
+			rebuilt := false
+			fixed := make(map[string]any, len(props))
+			for k, v := range props {
+				if strings.Contains(k, `\_`) {
+					k = strings.ReplaceAll(k, `\_`, `_`)
+					rebuilt = true
+				}
+				fixed[k] = v
+			}
+			if rebuilt {
+				n["patternProperties"] = fixed
+			}
+		}
+		for _, v := range n {
+			unescapePatternLiteralEscapes(v)
+		}
+	case []any:
+		for _, v := range n {
+			unescapePatternLiteralEscapes(v)
+		}
 	}
 }

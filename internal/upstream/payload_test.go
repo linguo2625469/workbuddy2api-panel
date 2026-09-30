@@ -288,3 +288,24 @@ func TestNormalizeImageURL(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeToolPatterns(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[{"role":"user","content":"path C:\\_dir"}],"tools":[{"type":"function","function":{"name":"agent_run","parameters":{"type":"object","properties":{"runId":{"type":"string","pattern":"^agent\\_run\\_"},"query":{"type":"string"}}}}}]} `
+	out := PrepareBodyOptWithEfforts([]byte(body), false, nil)
+	obj, err := decodeBody(out)
+	if err != nil {
+		t.Fatalf("unmarshal: %v (out=%s)", err, out)
+	}
+	tools := obj["tools"].([]any)
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	params := fn["parameters"].(map[string]any)
+	props := params["properties"].(map[string]any)
+	runID := props["runId"].(map[string]any)
+	if got := runID["pattern"]; got != "^agent_run_" {
+		t.Fatalf("pattern=%q, want %q", got, "^agent_run_")
+	}
+	msg := obj["messages"].([]any)[0].(map[string]any)
+	if got := msg["content"]; got != `path C:\_dir` {
+		t.Fatalf("message content mutated: %q", got)
+	}
+}
