@@ -336,9 +336,19 @@ func normalizeToolChoice(obj map[string]any) {
 
 // normalizeToolPatterns 归一化 tools 子树里 pattern 的非标准转义 `\_`（→ `_`）。
 //
-// 上游对工具 JSON Schema 的正则语法校验严格拒绝 `\_`，会返回
-// 400 code=11129 invalid_function_call_parameters。主流正则引擎将其视为
-// 普通下划线，因此只在工具 schema 内做无损归一化；消息正文等普通字符串不修改。
+// 上游对 tools[].function.parameters 做严格 JSON Schema/正则文法校验，pattern 含
+// `\_`（转义的字面量下划线）会整体拒收：400 code=11129 invalid_function_call_
+// parameters（displayMsg「工具定义不合规」）。`\_` 不是任何正则文法的合法转义，
+// 但所有主流引擎（RE2/PCRE/JS Annex B）都宽容地视为 `_` 本身——上游校验器比它们
+// 全部更严（对照 V8 严格文法 u 标志，唯一同样拒绝的实现）。实案：ZCode 的 exa 插件
+// agent_run 工具 runId/previousRunId 带 `^agent\_run\_`，deepseek 系全家确定性 400
+// → 网关侧归 ErrClient 只换号不罚但喂连败计数 → 轮转烧满 5 连败触发连败降权、
+// 客户端 503（2026-09-29/30 两次实案）。schema 级拒绝换账号无用，只能在发送前修。
+//
+// 归一无损：`\_` 与 `_` 在所有引擎匹配语义相同（各引擎实测 + 上游对照探针：归一后
+// 200），工具方功能不变。只动 tools 子树（pattern 值 + patternProperties 键）；
+// 消息正文里的 `\_`（如 Windows 路径 C:\_x）不碰。其余非标转义（`\:` 等）未证实
+// 触发，不扩面——有实案再议。独立于 sanitize 开关：这是「让请求通过」，不是脱敏。
 func normalizeToolPatterns(obj map[string]any) {
 	rawTools, ok := obj["tools"].([]any)
 	if !ok {
@@ -349,7 +359,7 @@ func normalizeToolPatterns(obj map[string]any) {
 		if !ok {
 			continue
 		}
-		// OpenAI 形态 tools[].function.parameters；兼容裸 tools[].parameters。
+		// OpenAI 形态 tools[].function.parameters；裸 tools[].parameters 兼容。
 		if fn, ok := tool["function"].(map[string]any); ok {
 			unescapePatternLiteralEscapes(fn["parameters"])
 		}
@@ -357,8 +367,9 @@ func normalizeToolPatterns(obj map[string]any) {
 	}
 }
 
-// unescapePatternLiteralEscapes 递归改写 schema 树里的 pattern 值与
-// patternProperties 键中的 `\_`。patternProperties 的键无法原地修改，命中时重建。
+// unescapePatternLiteralEscapes 递归改写 schema 树里 pattern 值与 patternProperties
+// 键中的 `\_` → `_`（patternProperties 的键也是正则；map 键不可原地改，命中时重建
+// 该层）。
 func unescapePatternLiteralEscapes(node any) {
 	switch n := node.(type) {
 	case map[string]any:
