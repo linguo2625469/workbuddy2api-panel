@@ -160,7 +160,10 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.ghost { background: transparent; }
 button.danger { color: var(--bad); }
 button.danger:hover:not(:disabled) { border-color: var(--bad); }
-button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
+button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-space: nowrap; }
+/* select.xs：header 里的紧凑选择框。通用 input/select 规则是 width:100%（表单页用），
+   header 里若不收窄会把同行 note 挤到换行——收成内容宽并压小外观，与 button.xs 同款。 */
+select.xs { width: auto; padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
 button.icon { padding: 7px 9px; }
 input, select {
   font: inherit; color: var(--ink); background: var(--surface-2);
@@ -194,7 +197,7 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .box > header h3 { font-size: 13.5px; font-weight: 600; }
 .box > header h3 .hint { font-size: 11.5px; font-weight: 400; color: var(--ink-3); margin-left: 6px; }
 .box > header .grow { flex: 1; }
-.box > header .note { color: var(--ink-3); font-size: 12px; }
+.box > header .note { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
 /* 面板块头部的下拉/输入按内容取宽：全局 input/select 是 width:100%（配置表单要整行），
    在 header 里会把标题挤成两行、把"近 3 天"这类短选项拉成一整条。 */
 .box > header select, .box > header input { width: auto; }
@@ -572,6 +575,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
   /* 用量统计条已改用 .kpis（见「用量视图」段），此处不再保留 .stats.compact 变体。 */
 
+  /* 到期提醒卡片（首页）：每账号一行，色点=危险度，正文数字用 mono 对齐。 */
+  .exp-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0;
+    font-size: 12.5px; }
+  .exp-row + .exp-row { border-top: 1px solid var(--line-soft); }
+  .exp-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; flex: none; }
+  .exp-nm { font-weight: 600; flex: none; min-width: 9em; }
+  .exp-main { color: var(--ink-2, inherit); }
+  .exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
+  .exp-main.err { color: var(--bad); }
+
 </style>
 </head>
 <body>
@@ -632,6 +646,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
         <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
+      </div>
+
+      <div class="box" id="expBox" hidden>
+        <header>
+          <h3>积分到期提醒<span class="hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="expNote"></span>
+          <button class="xs" id="btnExp">检查</button>
+        </header>
+        <div class="pad"><div id="expList"></div></div>
       </div>
 
       <div class="box">
@@ -762,6 +786,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号对比</h3>
           <span class="grow"></span>
           <span class="note" id="pkNote">—</span>
+          <select id="pkSort" class="xs" title="逐包明细的排序规则">
+            <option value="end_asc" selected>按到期时间</option>
+            <option value="size_desc">按面额大小</option>
+          </select>
           <button class="xs" id="btnPk">刷新</button>
         </header>
         <div class="pad"><div class="pk-grid" id="pkSummary"></div></div>

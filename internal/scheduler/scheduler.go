@@ -291,9 +291,9 @@ const wallclockCheckStep = time.Minute
 type slotWake int
 
 const (
-	slotFired slotWake = iota // 墙钟已到达计划时点：补跑本批
-	slotRearm                 // 排程已变（Reconfigure）：上层重算下一次唤醒
-	slotCancel                // ctx 取消：上层优雅退出
+	slotFired  slotWake = iota // 墙钟已到达计划时点：补跑本批
+	slotRearm                  // 排程已变（Reconfigure）：上层重算下一次唤醒
+	slotCancel                 // ctx 取消：上层优雅退出
 )
 
 // waitSlot 分段等待到 next 的**墙钟**时刻（next 由 nextFire 用 time.Date 构造、

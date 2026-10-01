@@ -224,3 +224,124 @@ func cleanupOrphanToolCalls(messages []any) ([]any, bool) {
 	}
 	return kept, true
 }
+
+// mergeAdjacentToolCalls 把**背靠背**的 assistant.tool_calls 消息合成一条（tool_calls 依原序拼接）。
+//
+// 2026-09-20 实机定位并复现的 11148 事故根因：部分 OpenAI 兼容 agent 客户端回放历史时把
+// 同一批并行工具调用拆成多条紧邻的独立 assistant 消息，出站载荷长成：
+//
+//	assistant tool_calls=[c00]
+//	assistant tool_calls=[c01]
+//	tool c00
+//	tool c01
+//
+// 上游要求「声明 tool_calls 的 assistant 之后必须紧跟它自己的结果」——紧随的若是另一条带
+// tool_calls 的 assistant，即返回 400 code=11148（extError tool_call_sequence_broken，
+// "tool calls and tool results do not match, please start a new conversation and retry"），
+// 整条会话报废：客户端每次重试重放同一条历史，池侧换号也无效（不是账号问题）。
+//
+// 对照实验（2026-09-20 在线上网关实测，同一批调用）：
+//   - 拆成两条 assistant（Codex Desktop 报文形状）+ deepseek-v4.1-flash → 503 / 11148
+//   - 合成一条 assistant（=本函数产物）      + deepseek-v4.1-flash → 200
+//   - 拆成两条 assistant                     + glm-5.3-flash      → 200（该模型宽容）
+//
+// 即：**行为本身合法**（上述第一种形态在 OpenAI 规范里也说得通），是上游 deepseek 系模型的
+// 校验更严。网关作为最后一道防线按最严口径归一，客户端不必感知。
+//
+// 合并条件从严，避免引入新语义：
+//   - 两条消息**相邻**（中间隔着任何消息都不合并——隔着消息说明不是同一批声明，
+//     凭猜测合并会改变语义，这类形态按其原样交给 repackToolResultBlocks 处理）；
+//   - 后一条 content 为空（content 非空无法无损拼接，不猜语义）；
+//   - 前一条本身必须是带 tool_calls 的 assistant（否则不合并，例如 assistant 文本 + 独立工具调用消息）。
+//
+// reasoning_content（thinking.go 的多轮回填字段）不丢：后一条有则搬到合并结果，两边都有则换行拼接
+// （deepseek 多轮要求 assistant 带思维链回填，丢弃会换一个错误）。
+func mergeAdjacentToolCalls(messages []any) ([]any, bool) {
+	if len(messages) < 2 {
+		return messages, false
+	}
+	out := make([]any, 0, len(messages))
+	changed := false
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			out = append(out, m)
+			continue
+		}
+		if role, _ := msg["role"].(string); role == "assistant" && len(out) > 0 {
+			// 形态一：本条是带 tool_calls 的 assistant 且没有正文 → 并入上一条
+			// 同为 assistant 且带 tool_calls 的消息（背靠背的并行调用声明）。
+			if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 && emptyContent(msg["content"]) {
+				if prev, ok := out[len(out)-1].(map[string]any); ok {
+					if prevRole, _ := prev["role"].(string); prevRole == "assistant" {
+						if prevCalls, ok := prev["tool_calls"].([]any); ok && len(prevCalls) > 0 {
+							prev["tool_calls"] = append(prevCalls, tcs...)
+							mergeReasoningContent(prev, msg)
+							changed = true
+							continue // 本条已并入上一条，不再单独出站
+						}
+					}
+				}
+			}
+			// 形态二（反向）：本条是纯正文 assistant，上一条是带 tool_calls 但没正文的
+			// assistant → 把正文折进上一条，合成 assistant(正文 + tool_calls)。这样
+			// "声明 tool_calls 的 assistant 紧跟它自己的结果"在两种拆分顺序下都成立。
+			//
+			// 谁会产出这个顺序：部分 OpenAI 兼容 agent 客户端的回放顺序（正文与
+			// 调用声明拆成两条独立 assistant）。
+			//
+			// 条件同样从严：只认**字符串正文**（数组正文可能含多模态块，拼接会丢结构，
+			// 交给 repackToolResultBlocks 原样处理）；上一条必须自身无正文。
+			if _, hasCalls := msg["tool_calls"]; !hasCalls {
+				if txt, ok := msg["content"].(string); ok && txt != "" {
+					if prev, ok := out[len(out)-1].(map[string]any); ok {
+						if prevRole, _ := prev["role"].(string); prevRole == "assistant" {
+							if prevCalls, ok := prev["tool_calls"].([]any); ok && len(prevCalls) > 0 && emptyContent(prev["content"]) {
+								prev["content"] = txt
+								mergeReasoningContent(prev, msg)
+								changed = true
+								continue // 正文已折进上一条
+							}
+						}
+					}
+				}
+			}
+		}
+		out = append(out, m)
+	}
+	if !changed {
+		return messages, false
+	}
+	return out, true
+}
+
+// mergeReasoningContent 把 src 的 reasoning_content 并入 dst（两边都有则换行拼接）。
+// deepseek 多轮要求 assistant 带思维链回填，合并时丢弃会换一个错误。
+func mergeReasoningContent(dst, src map[string]any) {
+	rc, _ := src["reasoning_content"].(string)
+	if rc == "" {
+		return
+	}
+	if prevRC, _ := dst["reasoning_content"].(string); prevRC != "" {
+		dst["reasoning_content"] = prevRC + "\n" + rc
+		return
+	}
+	dst["reasoning_content"] = rc
+}
+
+// emptyContent content 是否为空（缺失 / nil / 空串 / 空数组）。
+// 空数组也必须算空：有客户端把"没有正文"发成 `content: []` 而不是 null，此前按
+// "非字符串一律非空"处理 → 背靠背的两条 assistant(tool_calls) 不合并 → 上游
+// deepseek 系判 11148（正是 mergeAdjacentToolCalls 要挡的形态，条件漏了 []）。
+// 非空数组仍视为有内容：宁可漏合并，也不丢内容。
+func emptyContent(v any) bool {
+	switch c := v.(type) {
+	case nil:
+		return true
+	case string:
+		return c == ""
+	case []any:
+		return len(c) == 0
+	}
+	return false
+}

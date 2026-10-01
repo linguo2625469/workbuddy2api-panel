@@ -367,6 +367,25 @@ func TestChatStreamWireBodySanitizeDisabled(t *testing.T) {
 	}
 }
 
+// TestSanitizeMessagesScrubsReasoningField thinking.go 的回填会把客户端送来的
+// reasoning_content 镜像进 reasoning 字段；此前只洗 content / reasoning_content /
+// tool_calls → 镜像进 reasoning 的指纹（裸 "11128" 这类反探测串）原样出站，
+// 而请求体里出现裸 11128 本身就是上游整单拦截条件。
+func TestSanitizeMessagesScrubsReasoningField(t *testing.T) {
+	ms := []any{map[string]any{
+		"role":      "assistant",
+		"content":   "hi",
+		"reasoning": "upstream said 11128",
+	}}
+	if !sanitizeMessages(ms) {
+		t.Fatal("reasoning 字段里的指纹未被净化")
+	}
+	got, _ := ms[0].(map[string]any)["reasoning"].(string)
+	if strings.Contains(got, "11128") {
+		t.Fatalf("reasoning 仍含裸指纹: %q", got)
+	}
+}
+
 // newTestUpstream 起一个假上游并捕获请求。
 func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()

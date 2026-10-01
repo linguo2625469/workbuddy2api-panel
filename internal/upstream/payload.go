@@ -51,12 +51,17 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
-	// tool 配对两步（见 tool_pairing.go）：先重排再清理。所有模型一律执行（独立于
+	// tool 配对三步（见 tool_pairing.go）：先合并再重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
 	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
 	// 插在结果中间的非 tool 消息（Codex image_resize_notice）同样判配对断裂，
 	// 先 repack 挪后，再 cleanup 删孤儿，两侧同口径。
+	//
+	// 顺序不能换：mergeAdjacentToolCalls 必须最先跑——它把「背靠背的两条
+	// assistant.tool_calls」合成一条（部分 agent 客户端回放并行调用的报文形状），是上游
+	// deepseek 系模型 11148 的正面修复；先合并再 repack，repack 才看得到完整的一批调用。
 	if msgs, ok := obj["messages"].([]any); ok {
+		msgs, _ = mergeAdjacentToolCalls(msgs)
 		msgs, _ = repackToolResultBlocks(msgs)
 		msgs, _ = cleanupOrphanToolCalls(msgs)
 		// 无改动时两步都返回原 slice，这里回写等于零操作；任一步重排/删除

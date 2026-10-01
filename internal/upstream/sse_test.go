@@ -833,6 +833,46 @@ func TestNormalizeUsageCacheAliasesPreservesZeroResult(t *testing.T) {
 	}
 }
 
+// TestStreamHintErrorFrameObserver 上游 error 帧必须旁路通知观察者（账号处置挂载点），
+// 且透传字节不变——error 帧原文（code/msg/requestId）照常到达客户端。
+// 正常数据帧不得触发观察者。移植自 OkRoromori 分支的 WithErrorFrameObserver。
+func TestStreamHintErrorFrameObserver(t *testing.T) {
+	const errPayload = `{"error":{"code":6004,"message":"模型限流，将在 2026-09-27 01:00:00 重置"}}`
+	raw := "data: {\"id\":\"x1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: " + errPayload + "\n\n" +
+		"data: [DONE]\n\n"
+
+	var observed []string
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, strings.NewReader(raw), nil, WithErrorFrameObserver(func(payload string) {
+		observed = append(observed, payload)
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(observed) != 1 || observed[0] != errPayload {
+		t.Fatalf("观察者回调 = %v want [%s]", observed, errPayload)
+	}
+	// 透传字节不变：error 帧原文必须仍在响应里（error-passthrough 语义）。
+	if !strings.Contains(rec.Body.String(), "6004") {
+		t.Fatalf("error 帧原文未透传: %s", rec.Body.String())
+	}
+
+	// 正常流（无 error 帧）：观察者零回调。
+	var normalObserved int
+	raw2 := "data: {\"id\":\"x2\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+	rec2 := httptest.NewRecorder()
+	if err := StreamHint(rec2, strings.NewReader(raw2), nil, WithErrorFrameObserver(func(payload string) {
+		normalObserved++
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if normalObserved != 0 {
+		t.Fatalf("正常流触发了观察者 %d 次，want 0", normalObserved)
+	}
+}
+
 func TestUserResourceDetailedWithExpirySnapshot(t *testing.T) {
 	now := time.Now().In(softRateResetLoc)
 	soon := now.Add(24 * time.Hour).Truncate(time.Second)

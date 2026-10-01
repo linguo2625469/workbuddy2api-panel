@@ -477,11 +477,33 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 	return StreamHint(w, r, nil)
 }
 
+// StreamOption StreamHint 的可选行为开关（均不影响透传字节，只做旁路观测）。
+type StreamOption func(*streamOptions)
+
+type streamOptions struct {
+	onErrorFrame func(payload string)
+}
+
+// WithErrorFrameObserver 注册"上游以 error 帧报错"的观察者：透传该帧之前先用
+// payload（原始 data 内容）回调一次。给调用方一个**账号处置**的挂载点——
+// 上游「200 + error 帧」是真实形态（6004 限流、内容拦截、审核），此前网关在读
+// 第一帧之前就把账号记成功，限流号被当成健康号；有观察者后可在流尾按帧分类处置。
+func WithErrorFrameObserver(fn func(payload string)) StreamOption {
+	return func(o *streamOptions) { o.onErrorFrame = fn }
+}
+
 // StreamHint 同 Stream，但上游 error 帧透出前把 hintFn(payload) 的返回值写入
 // error.gateway_hint。hintFn 为 nil 或返回空串 → 原样透传（零改写）。
 // 空流兜底 error 帧（"empty upstream stream"）不带 hint（网关本地故障形态
 // 未覆盖，不编造）。
-func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) error {
+// opts：旁路观测开关（见 WithErrorFrameObserver），不改变任何透传字节。
+func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, opts ...StreamOption) error {
+	var o streamOptions
+	for _, f := range opts {
+		if f != nil {
+			f(&o)
+		}
+	}
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")
 	h.Set("Cache-Control", "no-cache")
@@ -527,6 +549,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string) 
 			// code/msg/requestId。error.message 即上游原文（如 6004 限流、审核拦截），
 			// 计入有效帧（避免误判空流补写 "empty upstream stream"）。
 			if _, hasErr := obj["error"]; hasErr {
+				// 旁路通知（账号处置用）：原始 payload 交给观察者，透传字节不变。
+				if o.onErrorFrame != nil {
+					o.onErrorFrame(payload)
+				}
 				if werr := writeRaw(payload); werr != nil {
 					return 0, werr
 				}
