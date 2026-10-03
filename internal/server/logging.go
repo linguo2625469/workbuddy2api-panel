@@ -165,12 +165,12 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	var chunk struct {
 		Error json.RawMessage `json:"error"`
 		Usage *struct {
-			PromptTokens         *int     `json:"prompt_tokens"`
-			CompletionTokens     *int     `json:"completion_tokens"`
-			TotalTokens          *int     `json:"total_tokens"`
-			Credit               *float64 `json:"credit"`
-			PromptCacheHitTokens *int     `json:"prompt_cache_hit_tokens"`
-			PromptCacheMissTok   *int     `json:"prompt_cache_miss_tokens"`
+			PromptTokens         *int            `json:"prompt_tokens"`
+			CompletionTokens     *int            `json:"completion_tokens"`
+			TotalTokens          json.RawMessage `json:"total_tokens"`
+			Credit               json.RawMessage `json:"credit"`
+			PromptCacheHitTokens *int            `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTok   *int            `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
@@ -190,13 +190,33 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		s.hasCompletionTokens = true
 		s.completionTokens = *chunk.Usage.CompletionTokens
 	}
-	if chunk.Usage.TotalTokens != nil {
-		s.hasTotalTokens = true
-		s.totalTokens = *chunk.Usage.TotalTokens
+	if len(chunk.Usage.TotalTokens) > 0 {
+		var total float64
+		if json.Unmarshal(chunk.Usage.TotalTokens, &total) == nil {
+			parsedTotal, valid := parseUsageTotalTokens(total)
+			if !valid {
+				s.hasTotalTokens = false
+				s.totalTokens = 0
+			} else {
+				s.hasTotalTokens = true
+				s.totalTokens = parsedTotal
+			}
+		} else {
+			s.hasTotalTokens = false
+			s.totalTokens = 0
+		}
 	}
-	if chunk.Usage.Credit != nil {
-		s.hasCredit = true
-		s.credit = *chunk.Usage.Credit
+	if len(chunk.Usage.Credit) > 0 {
+		var credit float64
+		if json.Unmarshal(chunk.Usage.Credit, &credit) == nil && validUsageCredit(credit, true) {
+			s.hasCredit = true
+			s.credit = credit
+		} else {
+			// An invalid later usage frame supersedes an earlier value; do not
+			// archive the previous frame's fee as if it belonged to this response.
+			s.hasCredit = false
+			s.credit = 0
+		}
 	}
 	if chunk.Usage.PromptCacheHitTokens != nil {
 		s.hasCacheHit = true

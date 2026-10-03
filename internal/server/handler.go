@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 
@@ -919,6 +920,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeSuccess
 			}
 			credit, hasCredit := stats.Credit()
+			total, hasTotal := stats.TotalTokens()
+			hasCredit = validUsageCost(credit, hasCredit, total, hasTotal)
 			if hit, miss, ok := stats.CacheTokens(); ok {
 				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
 			}
@@ -939,9 +942,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if hasCredit {
 				st.credit = credit
 				st.hasCredit = true
-				if total, tok := stats.TotalTokens(); tok && total > 0 {
-					h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
-				}
+				h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 			}
 			rc.Close()
 			return
@@ -1034,12 +1035,40 @@ func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) 
 	if usage == nil {
 		return 0, 0, false
 	}
-	c, _ := usage["credit"].(float64)
-	t, _ := usage["total_tokens"].(float64)
-	if t <= 0 {
+	c, hasCredit := usage["credit"].(float64)
+	t, hasTotal := usage["total_tokens"].(float64)
+	parsedTotal, validTotal := parseUsageTotalTokens(t)
+	if !validTotal {
 		return 0, 0, false
 	}
-	return c, int(t), true
+	if !validUsageCost(c, hasCredit, parsedTotal, hasTotal) {
+		return 0, 0, false
+	}
+	return c, parsedTotal, true
+}
+
+// validUsageCredit accepts only an explicitly present, finite, non-negative
+// upstream credit value. Zero is valid and represents a confirmed free request.
+func validUsageCredit(credit float64, present bool) bool {
+	return present && !math.IsNaN(credit) && !math.IsInf(credit, 0) && credit >= 0
+}
+
+// parseUsageTotalTokens accepts a finite positive integer that fits the
+// platform int used by the cost ledger.
+func parseUsageTotalTokens(total float64) (int, bool) {
+	if math.IsNaN(total) || math.IsInf(total, 0) || total <= 0 || math.Trunc(total) != total {
+		return 0, false
+	}
+	parsed := int(total)
+	if parsed <= 0 || float64(parsed) != total {
+		return 0, false
+	}
+	return parsed, true
+}
+
+// validUsageCost applies the shared billing gate for stream and aggregate usage.
+func validUsageCost(credit float64, hasCredit bool, total int, hasTotal bool) bool {
+	return validUsageCredit(credit, hasCredit) && hasTotal && total > 0
 }
 
 // rotateBackoff 轮转间指数退避 + 抖动（WAF 403 修复 P0-2）：第 i 次轮转失败

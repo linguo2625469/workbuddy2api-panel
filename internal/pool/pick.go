@@ -264,7 +264,7 @@ func (p *Pool) floorBlockedForModel(e *entry, model string, now time.Time) bool 
 // floorBlockedForRealmModel 同上，但带 realm 上下文（倍率按 (realm, 模型) 分桶，
 // 同名模型在 CN / global 两域倍率可不同）。realm 为空时按倍率表的空域键查。
 func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time.Time) bool {
-	if p.creditFloor <= 0 || model == "" || e.credits >= p.creditFloor {
+	if p.creditFloor <= 0 || model == "" || e.exactCredits() >= float64(p.creditFloor) {
 		return false
 	}
 	// 1) 本地实测台账：最权威（真实扣费证据）。

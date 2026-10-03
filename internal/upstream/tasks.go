@@ -36,24 +36,66 @@ const mpPlatform = "miniprogram"
 
 // Task 单个任务的对外视图（字段名与上游 JSON 对齐，多余字段不透出）。
 type Task struct {
-	TaskCode     string `json:"task_code"`
-	Title        string `json:"title,omitempty"`
-	Description  string `json:"description,omitempty"` // 操作指引（含跳转说明）
-	TaskDesc     string `json:"task_desc,omitempty"`   // 达成条件简述
-	Credit       int64  `json:"credit,omitempty"`      // 奖励积分（上游 reward_credit）
-	Energy       int64  `json:"energy,omitempty"`      // 奖励能量（上游 reward_energy）
-	HasReward    bool   `json:"has_reward,omitempty"`  // 是否带奖励
-	RewardBuddy  bool   `json:"reward_buddy,omitempty"`
-	TaskType     string `json:"task_type,omitempty"` // single（一次性）/ 累计型
-	Tag          string `json:"tag,omitempty"`       // 端标记（PC 等）
-	JumpURL      string `json:"jump_url,omitempty"`  // 客户端跳转协议（workbuddy://...）
-	Locked       bool   `json:"locked,omitempty"`    // 上游标记未解锁
-	Target       int64  `json:"target"`              // 目标次数（恒输出：0 是有效进度值）
-	Current      int64  `json:"current"`             // 当前进度（恒输出：0 是有效进度值）
-	AcceptStatus string `json:"accept_status,omitempty"`
-	Status       string `json:"status,omitempty"`    // 上游任务状态（complete 等）
-	Claimable    bool   `json:"claimable,omitempty"` // 进度达标且未领取（本地推算）
-	Claimed      bool   `json:"claimed,omitempty"`   // 已领取（accept_status == claimed）
+	TaskCode       string `json:"task_code"`
+	Code           string `json:"code,omitempty"`
+	TaskID         int64  `json:"task_id,omitempty"`
+	Title          string `json:"title,omitempty"`
+	Description    string `json:"description,omitempty"` // 操作指引（含跳转说明）
+	TaskDesc       string `json:"task_desc,omitempty"`   // 达成条件简述
+	Credit         int64  `json:"credit,omitempty"`      // 奖励积分（上游 reward_credit）
+	Energy         int64  `json:"energy,omitempty"`      // 奖励能量（上游 reward_energy）
+	HasReward      bool   `json:"has_reward,omitempty"`  // 是否带奖励
+	RewardBuddy    bool   `json:"reward_buddy,omitempty"`
+	TaskType       string `json:"task_type,omitempty"` // single（一次性）/ 累计型
+	Tag            string `json:"tag,omitempty"`       // 端标记（PC 等）
+	JumpURL        string `json:"jump_url,omitempty"`  // 客户端跳转协议（workbuddy://...）
+	Locked         bool   `json:"locked,omitempty"`    // 上游标记未解锁
+	Target         int64  `json:"target"`              // 目标次数（ProgressKnown=false 时省略）
+	Current        int64  `json:"current"`             // 当前进度（ProgressKnown=false 时省略）
+	ProgressKnown  bool   `json:"progress_known"`
+	RewardKnown    bool   `json:"reward_known"`
+	AcceptStatus   string `json:"accept_status,omitempty"`
+	Status         string `json:"status,omitempty"`    // 上游任务状态（complete 等）
+	Claimable      bool   `json:"claimable,omitempty"` // 进度达标且未领取（本地推算）
+	Claimed        bool   `json:"claimed,omitempty"`   // 已领取（accept_status == claimed）
+	creditKnown    bool   `json:"-"`
+	energyKnown    bool   `json:"-"`
+	hasRewardKnown bool   `json:"-"`
+}
+
+// MarshalJSON leaves the established CN zero-progress fields in place when their
+// source schema provides progress, while omitting them for task schemas that do
+// not report progress at all (such as the observed global task response).
+func (t Task) MarshalJSON() ([]byte, error) {
+	type taskAlias Task
+	raw, err := json.Marshal(taskAlias(t))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	if !t.ProgressKnown {
+		delete(fields, "target")
+		delete(fields, "current")
+	}
+	if !t.RewardKnown {
+		delete(fields, "credit")
+		delete(fields, "energy")
+		delete(fields, "has_reward")
+	} else {
+		if !t.creditKnown {
+			delete(fields, "credit")
+		}
+		if !t.energyKnown {
+			delete(fields, "energy")
+		}
+		if !t.hasRewardKnown {
+			delete(fields, "has_reward")
+		}
+	}
+	return json.Marshal(fields)
 }
 
 // ListTasks 拉取全量任务列表（默认口径，无端标记头）。
@@ -148,6 +190,8 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 	var resp struct {
 		Tasks []struct {
 			TaskCode     string          `json:"task_code"`
+			Code         string          `json:"code"`
+			TaskID       int64           `json:"task_id"`
 			Title        string          `json:"title"`
 			Description  string          `json:"description"`
 			TaskDesc     string          `json:"task_desc"`
@@ -166,45 +210,81 @@ func parseGrowthTasks(data json.RawMessage) ([]Task, error) {
 			Progress     json.RawMessage `json:"progress"`
 		} `json:"tasks"`
 	}
+	// Decode through raw task objects as well so field presence can be distinguished
+	// from a legitimate zero value.
+	var shape struct {
+		Tasks []map[string]json.RawMessage `json:"tasks"`
+	}
+	if err := json.Unmarshal(data, &shape); err != nil {
+		return nil, err
+	}
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return nil, err
 	}
 	out := make([]Task, 0, len(resp.Tasks))
-	for _, t := range resp.Tasks {
+	for i, t := range resp.Tasks {
 		cur, tgt := t.Current, t.Target
+		fields := shape.Tasks[i]
+		progressKnown := hasJSONValue(fields, "current") && hasJSONValue(fields, "target")
 		// progress 可能是 {current,target} 对象（实测口径），覆盖平铺字段。
-		if len(t.Progress) > 0 && string(t.Progress) != "null" {
+		if hasJSONValue(fields, "progress") {
 			var pr struct {
 				Current int64 `json:"current"`
 				Target  int64 `json:"target"`
 			}
-			if json.Unmarshal(t.Progress, &pr) == nil && (pr.Target > 0 || pr.Current > 0) {
+			var progressFields map[string]json.RawMessage
+			if json.Unmarshal(t.Progress, &pr) == nil && json.Unmarshal(t.Progress, &progressFields) == nil &&
+				hasJSONValue(progressFields, "current") && hasJSONValue(progressFields, "target") {
 				cur, tgt = pr.Current, pr.Target
+				progressKnown = true
 			}
 		}
+		taskCode := t.TaskCode
+		if taskCode == "" {
+			taskCode = t.Code
+		}
+		creditKnown := hasJSONValue(fields, "reward_credit")
+		energyKnown := hasJSONValue(fields, "reward_energy")
+		hasRewardKnown := hasJSONValue(fields, "has_reward")
+		rewardKnown := creditKnown || energyKnown || hasRewardKnown
 		claimed := t.AcceptStatus == "claimed"
 		out = append(out, Task{
-			TaskCode:     t.TaskCode,
-			Title:        t.Title,
-			Description:  t.Description,
-			TaskDesc:     t.TaskDesc,
-			Credit:       t.RewardCredit,
-			Energy:       t.RewardEnergy,
-			HasReward:    t.HasReward,
-			RewardBuddy:  t.RewardBuddy,
-			TaskType:     t.TaskType,
-			Tag:          t.Tag,
-			JumpURL:      t.JumpURL,
-			Locked:       t.Locked,
-			Target:       tgt,
-			Current:      cur,
-			AcceptStatus: t.AcceptStatus,
-			Status:       t.Status,
-			Claimable:    !claimed && tgt > 0 && cur >= tgt,
-			Claimed:      claimed,
+			TaskCode:       taskCode,
+			Code:           t.Code,
+			TaskID:         t.TaskID,
+			Title:          t.Title,
+			Description:    t.Description,
+			TaskDesc:       t.TaskDesc,
+			Credit:         t.RewardCredit,
+			Energy:         t.RewardEnergy,
+			HasReward:      t.HasReward,
+			RewardBuddy:    t.RewardBuddy,
+			TaskType:       t.TaskType,
+			Tag:            t.Tag,
+			JumpURL:        t.JumpURL,
+			Locked:         t.Locked,
+			Target:         tgt,
+			Current:        cur,
+			ProgressKnown:  progressKnown,
+			RewardKnown:    rewardKnown,
+			AcceptStatus:   t.AcceptStatus,
+			Status:         t.Status,
+			Claimable:      !claimed && tgt > 0 && cur >= tgt,
+			Claimed:        claimed,
+			creditKnown:    creditKnown,
+			energyKnown:    energyKnown,
+			hasRewardKnown: hasRewardKnown,
 		})
 	}
 	return out, nil
+}
+
+func hasJSONValue(fields map[string]json.RawMessage, name string) bool {
+	raw, ok := fields[name]
+	if !ok {
+		return false
+	}
+	return len(bytes.TrimSpace(raw)) > 0 && string(bytes.TrimSpace(raw)) != "null"
 }
 
 // AcceptTasks 接受任务（幂等：已 accepted 时上游返回成功或业务提示，均不视为致命错误）。

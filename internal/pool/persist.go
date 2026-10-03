@@ -5,6 +5,7 @@ package pool
 import (
 	"encoding/json"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -133,6 +134,7 @@ func (p *Pool) load() {
 // 本地 load() 与 Redis 快照恢复共用；调用方必须已持有 p.mu。
 func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 	now := time.Now()
+	migratedState := false
 	for uid, s := range accounts {
 		// err_total 优先；旧文件的 err_count（连续错误）作一次性迁移源映射进来（二者取较大者，
 		// 尽最大可能保留历史观测信号——旧语义下 err_count 也真实发生过错误，不应丢）。
@@ -143,6 +145,7 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 		e := &entry{
 			a:                        &auth.Auth{UID: uid}, // placeholder，Add 时会换成完整凭证
 			credits:                  s.Credits,
+			creditsRemainder:         s.CreditsRemainder,
 			creditsTotal:             s.CreditsTotal,
 			creditsExpiring:          s.CreditsExpiring,
 			creditsEarliestExpiry:    s.CreditsEarliestExpiry,
@@ -160,6 +163,10 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			softStreak:               s.SoftStreak,
 			sessionDeadFails:         s.SessionDeadFails,
 			consecutiveFails:         s.ConsecutiveFails,
+		}
+		if math.IsNaN(e.creditsRemainder) || math.IsInf(e.creditsRemainder, 0) || e.creditsRemainder < -0.5 || e.creditsRemainder >= 0.5 {
+			e.creditsRemainder = 0
+			migratedState = true
 		}
 		// 到期快照按当前时刻惰性清洗：已过期、零剩余或超出总余额的脏数据不恢复。
 		if e.creditsExpiring < 0 {
@@ -198,19 +205,27 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			}
 		}
 		// 成本账本：惰性过滤过期（modelCostTTL 外不恢复）+ 剔除结构破损条目
-		// （负 per1k / 零 LastSeen——上游异常或旧文件手改产生的脏数据）。
+		// （负/非有限 per1k / 零 LastSeen）。旧版缺失 credit 会与真实 0 混为同一
+		// 记录形态；仅对缺少可信标记的零价条目降为未知，正价旧记录保持可用。
 		if len(s.ModelCosts) > 0 {
 			for m, mc := range s.ModelCosts {
-				if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL || mc.CostPer1k < 0 {
+				if mc.LastSeen.IsZero() || now.Sub(mc.LastSeen) > modelCostTTL || mc.CostPer1k < 0 || math.IsNaN(mc.CostPer1k) || math.IsInf(mc.CostPer1k, 0) {
+					continue
+				}
+				if mc.CostPer1k == 0 && !mc.CreditVerified {
+					migratedState = true
 					continue
 				}
 				if e.modelCost == nil {
 					e.modelCost = map[string]modelCostEntry{}
 				}
-				e.modelCost[m] = modelCostEntry{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+				e.modelCost[m] = modelCostEntry{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples, CreditVerified: mc.CreditVerified}
 			}
 		}
 		p.byUID[uid] = e
+	}
+	if migratedState {
+		p.dirty.Store(true)
 	}
 }
 
@@ -284,6 +299,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 	for uid, e := range p.byUID {
 		s := stateAccount{
 			Credits:                  e.credits,
+			CreditsRemainder:         e.creditsRemainder,
 			CreditsTotal:             e.creditsTotal,
 			Disabled:                 e.disabled,
 			Reason:                   e.reason,
@@ -334,7 +350,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 				if s.ModelCosts == nil {
 					s.ModelCosts = map[string]stateModelCost{}
 				}
-				s.ModelCosts[m] = stateModelCost{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples}
+				s.ModelCosts[m] = stateModelCost{CostPer1k: mc.CostPer1k, LastSeen: mc.LastSeen, Samples: mc.Samples, CreditVerified: mc.CreditVerified}
 			}
 		}
 		sf.Accounts[uid] = s

@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 )
 
 // getConfig 返回当前配置文件内容与路径（前端按 schema 渲染表单）。
@@ -23,9 +24,11 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":     true,
-		"path":   p.cfg.ConfigPath,
-		"config": cfg,
+		"ok":                         true,
+		"path":                       p.cfg.ConfigPath,
+		"config":                     cfg,
+		"api_key_env_managed":        os.Getenv("WB2A_API_KEY") != "",
+		"environment_managed_fields": configManagedFields(cfg),
 	})
 }
 
@@ -50,8 +53,23 @@ func (p *Panel) saveConfig(w http.ResponseWriter, r *http.Request) {
 		restartRequired = []string{}
 	}
 	log.Printf("panel: 配置已保存（热生效完成；需重启字段 %d 个）", len(restartRequired))
+	var managedFields []string
+	if p.cfg.LoadConfig != nil {
+		if config, err := p.cfg.LoadConfig(); err == nil {
+			managedFields = configManagedFields(config)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":               true,
-		"restart_required": restartRequired,
+		"ok":                         true,
+		"restart_required":           restartRequired,
+		"api_key_env_managed":        os.Getenv("WB2A_API_KEY") != "",
+		"environment_managed_fields": managedFields,
 	})
+}
+
+func configManagedFields(config any) []string {
+	if provider, ok := config.(interface{ EnvironmentManagedFields() []string }); ok {
+		return provider.EnvironmentManagedFields()
+	}
+	return nil
 }

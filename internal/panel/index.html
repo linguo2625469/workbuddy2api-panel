@@ -94,16 +94,31 @@ body {
 .qgroup header .nm { font-weight: 600; font-size: 13.5px; }
 .qgroup header .cnt { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .qrow {
-  display: grid; grid-template-columns: 118px 1fr 52px 84px minmax(120px, 240px);
+  display: grid; grid-template-columns: minmax(88px, 118px) minmax(0, 1fr) 72px 96px minmax(100px, 240px);
   gap: 10px; align-items: center; padding: 7.5px 16px; font-size: 13px;
 }
 .qrow:hover { background: var(--surface-2); }
 .qrow .code { font: 11.5px/1.35 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qrow .name { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .qrow .name .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.qrow .prog { font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; }
+.qrow .prog { min-width: 0; font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qrow .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .qrow .msg { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-job > header { align-items: center; flex-wrap: wrap; }
+.task-job > header .nm { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.task-job > header .grow { flex: 1; }
+.task-job > header button { flex: none; }
+.task-job > .job-summary { display: block; padding: 0 16px 10px; line-height: 1.65; overflow-wrap: anywhere; }
+.task-job > .job-results { padding-bottom: 10px; }
+.task-job > .job-results > summary { margin: 0 16px 8px; cursor: pointer; }
+@media (max-width: 640px) {
+  .qrow { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name st" "code prog" "msg msg"; gap: 4px 12px; }
+  .qrow .code { grid-area: code; }
+  .qrow .name { grid-area: name; }
+  .qrow .prog { grid-area: prog; }
+  .qrow .st { grid-area: st; }
+  .qrow .msg { grid-area: msg; white-space: normal; overflow-wrap: anywhere; }
+}
 .qdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .qdot.done { background: var(--ok); }
 .qdot.run { background: var(--accent); animation: qpulse 1.2s ease-in-out infinite; }
@@ -661,6 +676,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <section class="view" id="view-taskscenter" hidden>
       <div class="box">
         <header>
+          <h3>后台自动任务 <span class="hint" id="taskJobsSummary"></span></h3>
+          <span class="grow"></span>
+          <button class="xs" id="btnTaskJobsReload">刷新进度</button>
+        </header>
+        <div class="state" id="taskJobsNote">新增国区账号后自动执行，每日按成长任务排程继续推进；可在账号任务中手动启动。</div>
+        <div id="taskJobsList"></div>
+      </div>
+      <div class="box">
+        <header>
           <h3>成长任务队列 <span class="hint" id="qcSummary"></span></h3>
           <span class="grow"></span>
           <button class="xs" id="btnSchoolVouchers" title="开学季抽奖抽中的第三方券码（活动已结束，历史券码仍可查）">查询券码</button>
@@ -911,7 +935,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <input type="checkbox" name="growth_enabled" checked></div>
               <label class="fld"><span class="lb">执行时点（小时，逗号分隔）</span>
                 <input name="growth_hours" placeholder="1">
-                <span class="hint">每日到点自动「扫描 + 执行全部待办」（Sequential 任务链零点解锁后自动推进，建议零点后）</span></label>
+                <span class="hint">开关同时控制新增国区账号和每日后台执行。每日到点推进未完成项，建议设在零点后。</span></label>
             </div>
           </div>
         </div>
@@ -1085,7 +1109,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button class="xs chip" data-ch="chat">对话</button>
             <button class="xs chip" data-ch="sys">系统</button>
           </span>
-          <span class="note" id="logNote">最近 500 行</span>
+          <span class="note" id="logNote">每频道最近 500 行；任务日志可跨重启查询</span>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
         <pre id="logBox"></pre>
@@ -1098,11 +1122,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 <div class="veil" id="taskVeil">
   <div class="dlg" style="width:940px">
     <header>
-      <h3>积分任务 <span class="hint" id="taskWho"></span></h3>
-      <div class="hint">查询上游任务进度；「接受」为报名（幂等），「领取」在进度达标后可用。所有操作走网关，无需外部脚本。</div>
+      <h3>账号任务 <span class="hint" id="taskWho"></span></h3>
+      <div class="hint">操作随账号能力开放；「领取」仅在进度达标后可用。</div>
     </header>
     <div class="body">
       <div class="state" id="taskState"><span class="dots">加载中</span></div>
+      <div class="hint" id="taskNote" hidden style="margin-bottom:12px"></div>
+      <div id="taskJobView" hidden style="margin-bottom:12px">
+        <div class="state" id="taskJobState" aria-live="polite"></div>
+        <details><summary class="hint">查看本次执行结果</summary><div id="taskJobResults"></div></details>
+      </div>
       <div class="tbl-wrap">
         <table class="acc md" id="taskTable" hidden>
           <thead><tr><th class="mark" aria-hidden="true"></th><th>任务</th><th>进度</th><th>奖励</th><th>状态</th><th class="c-acts"></th></tr></thead>
@@ -1113,7 +1142,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="grow"></span>
       <button id="btnTaskAcceptAll">全部接受</button>
-      <button id="btnTaskAutoAll" class="primary">一键完成可自动任务</button>
+      <button id="btnTaskAutoAll" class="primary">后台完成可自动任务</button>
       <button id="btnTaskReload">重新查询</button>
       <button id="btnCloseTask">关闭</button>
     </footer>

@@ -2,6 +2,7 @@
 package pool
 
 import (
+	"math"
 	"sync/atomic"
 	"time"
 
@@ -83,17 +84,17 @@ type Status struct {
 	RateLimitedModels []RateLimitedModel `json:"rate_limited_models,omitempty"`
 	// Realm 账号域（cn/global，auth.Realm() 计算值；含 global.enabled 开关闸）。
 	// 供面板/状态接口按域分组展示。
-	Realm           string     `json:"realm,omitempty"`
-	Disabled        bool       `json:"disabled"`
-	DisabledReason  string     `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
-	SuccessCount    int64      `json:"success_count,omitempty"`
-	ErrTotal        int64      `json:"err_total,omitempty"`
-	LastSuccessTime time.Time  `json:"last_success,omitempty"`
-	LastErrTime     time.Time  `json:"last_err,omitempty"`
+	Realm           string    `json:"realm,omitempty"`
+	Disabled        bool      `json:"disabled"`
+	DisabledReason  string    `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	SuccessCount    int64     `json:"success_count,omitempty"`
+	ErrTotal        int64     `json:"err_total,omitempty"`
+	LastSuccessTime time.Time `json:"last_success,omitempty"`
+	LastErrTime     time.Time `json:"last_err,omitempty"`
 	// CheckinDone 本地今日已签到（签到成功或上游"今天已签到"幂等拒绝均算）。
 	// global 域账号无签到体系，恒为 false。面板签到按钮据此显示 签到/已签。
-	CheckinDone bool        `json:"checkin_done,omitempty"`
-	TokenUsage  TokenUsage  `json:"token_usage,omitempty"`
+	CheckinDone bool       `json:"checkin_done,omitempty"`
+	TokenUsage  TokenUsage `json:"token_usage,omitempty"`
 	// ModelCosts 每模型实测成本台账（P1-anti-monopoly 可观测性）：运维据此自查
 	//「为什么总选它」——tier 0（免费）垄断 / tier 2 单价排序一眼可见。
 	// 仅 modelCostTTL 内的有效观测，每模型一行（cost_per_1k + last_seen +
@@ -166,14 +167,19 @@ const modelCostTTL = 6 * time.Hour
 
 // modelCostEntry 运行时成本账本（持久化镜像 stateModelCost 与其字段一一对应）。
 type modelCostEntry struct {
-	CostPer1k float64
-	LastSeen  time.Time
-	Samples   int
+	CostPer1k      float64
+	LastSeen       time.Time
+	Samples        int
+	CreditVerified bool
 }
 type entry struct {
-	a            *auth.Auth
-	credits      int64
-	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
+	a       *auth.Auth
+	credits int64
+	// creditsRemainder preserves sub-credit consumption while Credits stays an
+	// integer for the existing status and routing interfaces. It is signed
+	// because credits is the nearest integer to the exact balance.
+	creditsRemainder float64
+	creditsTotal     int64 // 积分总额度（UserResource 聚合；0 = 未知）
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。
@@ -242,6 +248,47 @@ type entry struct {
 	modelCost map[string]modelCostEntry
 	// inFlight 单账号在途请求数（运行态，不持久化）。用 atomic 避免 Pick 热路径拿写锁。
 	inFlight atomic.Int64
+}
+
+const creditBalancePrecision = 1_000_000_000_000
+
+// exactCredits returns the estimated balance including sub-credit usage.
+func (e *entry) exactCredits() float64 {
+	return float64(e.credits) + e.creditsRemainder
+}
+
+// setExactCredits keeps the legacy integer field rounded to the nearest credit
+// and stores the signed fractional difference separately. Picocredit rounding
+// prevents repeated decimal charges (for example, ten charges of 0.1) from
+// accumulating binary floating-point drift across the integer boundary.
+func (e *entry) setExactCredits(balance float64) {
+	if math.IsNaN(balance) || math.IsInf(balance, 0) || balance <= 0 {
+		e.credits = 0
+		e.creditsRemainder = 0
+		return
+	}
+	const maxInt64Credits = int64(1<<63 - 1)
+	if balance >= float64(maxInt64Credits) {
+		e.credits = maxInt64Credits
+		e.creditsRemainder = 0
+		return
+	}
+	whole := math.Round(balance)
+	remainder := math.Round((balance-whole)*creditBalancePrecision) / creditBalancePrecision
+	if remainder >= 0.5 {
+		whole++
+		remainder--
+	} else if remainder < -0.5 {
+		whole--
+		remainder++
+	}
+	if whole < 0 {
+		e.credits = 0
+		e.creditsRemainder = 0
+		return
+	}
+	e.credits = int64(whole)
+	e.creditsRemainder = remainder
 }
 
 // modelCostOf 返回该账号在指定 model 上的有效成本观测；无观测或观测过期返回 ok=false。
@@ -405,19 +452,20 @@ func (e *entry) fallbackKind(now time.Time) string {
 
 // stateAccount 单个账号的持久化状态（JSON tag 全小写下划线，向后兼容：缺字段零值）。
 type stateAccount struct {
-	Credits      int64     `json:"credits"`
-	CreditsTotal int64     `json:"credits_total,omitempty"`
-	Disabled     bool      `json:"disabled"`
-	Reason       string    `json:"reason,omitempty"`
-	Until        time.Time `json:"until,omitempty"`
-	CoolKind     CoolKind  `json:"cool_kind"`
-	SuccessCount int64     `json:"success_count,omitempty"`
+	Credits          int64     `json:"credits"`
+	CreditsRemainder float64   `json:"credits_remainder,omitempty"`
+	CreditsTotal     int64     `json:"credits_total,omitempty"`
+	Disabled         bool      `json:"disabled"`
+	Reason           string    `json:"reason,omitempty"`
+	Until            time.Time `json:"until,omitempty"`
+	CoolKind         CoolKind  `json:"cool_kind"`
+	SuccessCount     int64     `json:"success_count,omitempty"`
 	// err_total 累计错误计数。旧版 err_count（连续错误）仍可读：加载时映射到 err_total，
 	// 仅作一次性迁移，不再回写 err_count。
-	ErrTotal    int64      `json:"err_total,omitempty"`
-	ErrCount       int        `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
-	LastSuccess    time.Time  `json:"last_success,omitempty"`
-	LastErr        time.Time  `json:"last_err,omitempty"`
+	ErrTotal    int64     `json:"err_total,omitempty"`
+	ErrCount    int       `json:"err_count,omitempty"` // 兼容旧文件的迁移源，仅读取
+	LastSuccess time.Time `json:"last_success,omitempty"`
+	LastErr     time.Time `json:"last_err,omitempty"`
 	// LastCheckinDay 最近一次签到成功的本地日期（entry.lastCheckinDay 同源）。
 	// 持久化以保留「当日已签」状态：签到后重启，面板按钮不回退成「签到」。
 	LastCheckinDay string     `json:"last_checkin_day,omitempty"`
@@ -474,9 +522,10 @@ type stateModelCooldown struct {
 // stateModelCost 单个 (账号, 模型) 的成本观测持久化记录，与运行态 modelCostEntry
 // 同构（单一表示，内存与落盘不搞两套）。
 type stateModelCost struct {
-	CostPer1k float64   `json:"cost_per_1k"`
-	LastSeen  time.Time `json:"last_seen"`
-	Samples   int       `json:"samples,omitempty"`
+	CostPer1k      float64   `json:"cost_per_1k"`
+	LastSeen       time.Time `json:"last_seen"`
+	Samples        int       `json:"samples,omitempty"`
+	CreditVerified bool      `json:"credit_verified,omitempty"`
 }
 
 // stateFile 持久化格式。

@@ -4,6 +4,7 @@ package pool
 
 import (
 	"log"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -111,6 +112,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 			e.credits = remain
 			e.creditsTotal = total
 		}
+		e.creditsRemainder = 0
 		// ReenableIfCredits 只有聚合余额上下文；到期明细必须由 SetCreditsDetailed
 		// 重新写入，不能沿用旧窗口/旧批次的缓存。
 		e.creditsExpiring = 0
@@ -178,13 +180,13 @@ func (p *Pool) NoteSuccess(uid string) {
 // （ReenableIfCredits/SetCreditsDetailed 以 authoritative 余额重置），扣减只是
 // 两次签到之间的内插估计；credit=0（免费请求）不动余额。
 func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
-	if uid == "" || model == "" || tokens <= 0 {
+	if uid == "" || model == "" || tokens <= 0 || math.IsNaN(credit) || math.IsInf(credit, 0) || credit < 0 {
 		return
 	}
 	// 单价按每千 token 归一，消除请求长度差异。
 	per1k := credit / float64(tokens) * 1000
-	if per1k < 0 {
-		per1k = 0
+	if math.IsInf(per1k, 0) {
+		per1k = math.MaxFloat64
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -193,11 +195,9 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		return
 	}
 	if credit > 0 {
-		d := int64(credit + 0.5) // 四舍五入
-		if d > e.credits {
-			d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
-		}
-		e.credits -= d
+		oldCredits := e.credits
+		e.setExactCredits(e.exactCredits() - credit)
+		d := oldCredits - e.credits // 到期快照仍以既有整数口径递减
 		if e.creditsExpiring > 0 {
 			if d > e.creditsExpiring {
 				e.creditsExpiring = 0
@@ -220,7 +220,7 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 	const alpha = 0.3
 	prev, seen := e.modelCost[model]
 	if !seen {
-		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1}
+		e.modelCost[model] = modelCostEntry{CostPer1k: per1k, LastSeen: time.Now(), Samples: 1, CreditVerified: true}
 	} else {
 		// 限免结束事件（判定在写入口，只看覆盖前值）：此前 tier 0（实测免费，
 		// per1k≤0）且本次实测收费（per1k>0）——账号在该模型上的免费窗口结束。
@@ -228,9 +228,10 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 			log.Printf("[pool] model %s on uid %s: free tier ended, now %.3f credits/1k", model, logfmt.UID8(uid), per1k)
 		}
 		e.modelCost[model] = modelCostEntry{
-			CostPer1k: prev.CostPer1k*(1-alpha) + per1k*alpha,
-			LastSeen:  time.Now(),
-			Samples:   prev.Samples + 1,
+			CostPer1k:      prev.CostPer1k*(1-alpha) + per1k*alpha,
+			LastSeen:       time.Now(),
+			Samples:        prev.Samples + 1,
+			CreditVerified: true,
 		}
 	}
 	p.dirty.Store(true) // 账本已持久化：写入口统一置脏

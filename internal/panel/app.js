@@ -403,7 +403,7 @@ function renderAccounts(list) {
       '</span></td>' +
       '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
       '<td class="acts">' +
-        '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>' +
+        (s.realm === 'global' ? '' : '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>') +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '">余额</button>' +
         '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' +
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
@@ -417,6 +417,11 @@ async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
+    const hasCNAccount = (d.accounts || []).some(account => account.realm !== 'global' && !account.disabled);
+    for (const id of ['btnCheckinAll', 'btnTravelAll']) {
+      $(id).disabled = !hasCNAccount;
+      $(id).title = hasCNAccount ? '' : '当前没有适用此操作的国内区账号';
+    }
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
@@ -448,7 +453,8 @@ $('accBody').addEventListener('click', async ev => {
   try {
     if (a === 'checkin') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/checkin', { method: 'POST' });
-      toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+      const note = checkinResultNote(r);
+      toast(note.message, note.severity);
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
@@ -718,9 +724,10 @@ async function loadLogs() {
     if (logPin && atEnd) box.scrollTop = box.scrollHeight;
     const counts = {};
     for (const e of (d.entries || [])) counts[e.ch] = (counts[e.ch] || 0) + 1;
-    $('logNote').textContent = logCh === 'all'
+    $('logNote').textContent = (logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
-      : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
+      : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行') +
+      (d.archive_error ? ' · 任务日志保存失败：' + d.archive_error : ' · 每频道独立保留');
   } catch (e) { /* 概览已提示 */ }
 }
 
@@ -916,16 +923,21 @@ async function loadConfig() {
     cfgLoaded = d.config;
     $('cfgPath').textContent = d.path || '';
     const f = $('cfgForm');
+    const managed = d.environment_managed_fields || [];
     for (const [name, path] of Object.entries(CFG_MAP)) {
       const el = f.elements[name];
       if (!el) continue;
+      el.disabled = managed.includes(path.join('.'));
+      el.title = el.disabled ? '此项由启动环境变量设置，请在部署配置中修改。' : '';
       const v = dig(cfgLoaded, path);
       if (el.type === 'checkbox') el.checked = !!v;
       else if (Array.isArray(v)) el.value = v.join(', ');
       else el.value = v == null ? '' : v;
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
-    $('cfgNote').textContent = '';
+    $('cfgKey').disabled = !!d.api_key_env_managed;
+    $('cfgKey').title = d.api_key_env_managed ? '访问密钥由启动环境变量设置，请在部署配置中修改。' : '';
+    $('cfgNote').textContent = managed.length ? '由启动环境管理：' + managed.join('、') : '';
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
 function collectConfig() {
@@ -933,6 +945,7 @@ function collectConfig() {
   for (const [name, path] of Object.entries(CFG_MAP)) {
     const el = f.elements[name];
     if (!el) continue;
+    if (el.disabled) continue;
     let v;
     if (el.type === 'checkbox') v = el.checked;
     else if (el.type === 'number') { v = el.value.trim() === '' ? undefined : Number(el.value); }
@@ -994,12 +1007,14 @@ $('cfgForm').onsubmit = async ev => {
   btn.disabled = true; btn.textContent = '保存中…';
   try {
     const r = await api('config', { method: 'POST', body: JSON.stringify(collectConfig()) });
-    const n = (r.restart_required || []).length;
-    toast(n ? '配置已保存，其中 ' + n + ' 项需重启进程生效' : '配置已保存并立即生效', 'ok');
+    const fields = r.restart_required || [];
+    const restartNote = fields.length ? '需重启生效：' + fields.join('、') : '';
+    toast(fields.length ? '配置已保存；部分改动需重启生效' : '配置已保存并立即生效', 'ok');
     // 密钥可能已改：本次会话沿用新值，避免下一次轮询被 401。
     const k = $('cfgKey').value.trim();
-    if (k) localStorage.setItem(LS_KEY, k);
-    loadConfig();
+    if (k && !r.api_key_env_managed) localStorage.setItem(LS_KEY, k);
+    await loadConfig();
+    $('cfgNote').textContent = [restartNote, (r.environment_managed_fields || []).length ? '由启动环境管理：' + r.environment_managed_fields.join('、') : ''].filter(Boolean).join('；');
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
@@ -1129,7 +1144,56 @@ async function checkAuthGate() {
 start();
 
 /* ── 积分任务 ─────────────────────────────────────────────────────── */
-let taskUID = null;
+let taskUID = null, taskCapabilities = { accept: false, claim: false, automate: false };
+let taskJobTimer = null, taskJobPolling = null, taskJobID = null, taskJobGeneration = 0;
+let taskJobsLoading = false;
+
+// 服务端状态与界面反馈共用的纯函数，避免把已提交/失败当成已完成。
+function checkinResultNote(r) {
+  if (r.skipped) return { message: r.skip_reason || '该账号不适用签到', severity: '' };
+  const balance = r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '';
+  if (!r.checkin_done) return { message: '签到未完成：' + (r.checkin_error || r.checkin_message || '请稍后重试') + balance, severity: 'err' };
+  if (r.balance_error) return { message: '签到已完成；余额刷新失败：' + r.balance_error, severity: 'err' };
+  return { message: '签到已完成' + balance, severity: 'ok' };
+}
+
+function taskOutcomeStatus(item) {
+  if (item.claim_error) return 'claim_pending';
+  return item.status || (item.claimed ? 'done' : item.skipped ? 'skipped' : 'awaiting_progress');
+}
+
+function taskResultSummary(results) {
+  const counts = { done: 0, skipped: 0, error: 0, awaiting_progress: 0, claim_pending: 0, accepted: 0 };
+  for (const item of results || []) {
+    const state = taskOutcomeStatus(item);
+    if (Object.prototype.hasOwnProperty.call(counts, state)) counts[state]++;
+    else counts.error++;
+  }
+  const parts = ['已完成 ' + counts.done + ' 项'];
+  if (counts.accepted) parts.push('报名已提交 ' + counts.accepted + ' 批');
+  if (counts.awaiting_progress) parts.push('等待计分 ' + counts.awaiting_progress + ' 项');
+  if (counts.claim_pending) parts.push('领奖待重试 ' + counts.claim_pending + ' 项');
+  if (counts.skipped) parts.push('跳过 ' + counts.skipped + ' 项');
+  if (counts.error) parts.push('失败 ' + counts.error + ' 项');
+  return { message: parts.join('，'), severity: counts.error || counts.claim_pending ? 'err' : counts.awaiting_progress || counts.skipped || !counts.done ? '' : 'ok' };
+}
+
+function taskRowPresentation(t, caps) {
+  const code = t.task_code || t.code || '';
+  const cur = t.current ?? 0, tgt = t.target ?? 0;
+  const progress = t.progress_known === false ? '未提供' : tgt ? cur + ' / ' + tgt : cur > 0 ? String(cur) : '—';
+  const rewards = [];
+  if (t.credit) rewards.push('+' + t.credit + ' 分');
+  if (t.energy) rewards.push('+' + t.energy + ' 能');
+  if (t.reward_buddy) rewards.push('Buddy');
+  const reward = t.reward_known === false ? '未提供' : rewards.join(' ') || '—';
+  const state = t.claimed ? '已领取' : t.claimable ? '可领取' : t.locked ? '未解锁'
+    : t.accept_status === 'accepted' ? '进行中' : t.status === 'completed' || t.status === 'complete' ? '已完成'
+    : t.status === 'available' ? '可在客户端完成' : '未接受';
+  const action = !code || t.claimed || t.locked ? '' : t.claimable && caps.claim ? 'claim'
+    : caps.automate && AUTO_TASKS[code] ? 'auto' : t.accept_status !== 'accepted' && caps.accept ? 'accept' : '';
+  return { code, progress, reward, state, action };
+}
 
 // 可自动完成的任务（与后端 autoActions 表一致）：判据为行为事件、可经网关复现。
 // 其余任务需在官方客户端内交互，面板只展示指引（行 title 提示）。
@@ -1163,19 +1227,36 @@ const AUTO_TASKS = {
 };
 
 function openTasks(uid) {
+  taskJobGeneration++;
+  if (taskJobTimer) clearInterval(taskJobTimer);
+  taskJobTimer = null;
+  taskJobID = null;
   taskUID = uid;
+  taskCapabilities = { accept: false, claim: false, automate: false };
+  $('btnTaskAcceptAll').hidden = true;
+  $('btnTaskAutoAll').hidden = true;
+  $('taskNote').hidden = true;
+  $('taskJobView').hidden = true;
+  $('btnTaskAutoAll').disabled = false;
+  $('btnTaskAutoAll').textContent = '后台完成可自动任务';
   $('taskWho').textContent = uid.slice(0, 16);
   $('taskVeil').classList.add('on');
   $('btnTaskReload').hidden = false;
   loadTasks();
+  loadAccountTaskJob(uid);
 }
-function closeTasks() { $('taskVeil').classList.remove('on'); taskUID = null; }
+function closeTasks() {
+  taskJobGeneration++;
+  $('taskVeil').classList.remove('on'); taskUID = null; taskJobID = null;
+  if (taskJobTimer) clearInterval(taskJobTimer);
+  taskJobTimer = null;
+}
 $('btnCloseTask').onclick = closeTasks;
-$('btnTaskReload').onclick = loadTasks;
+$('btnTaskReload').onclick = () => { loadTasks(); if (taskUID) loadAccountTaskJob(taskUID); };
 
 // 全部接受：把该账号未接受的任务一次性报名（幂等，跳过已接受/已领取）。
 $('btnTaskAcceptAll').onclick = async () => {
-  if (!taskUID) return;
+  if (!taskUID || !taskCapabilities.accept) return;
   const btn = $('btnTaskAcceptAll');
   btn.disabled = true; btn.textContent = '接受中…';
   try {
@@ -1190,32 +1271,127 @@ $('btnTaskAcceptAll').onclick = async () => {
   finally { btn.disabled = false; btn.textContent = '全部接受'; loadTasks(); }
 };
 
-// 一键完成全部可自动任务（耗时较长：含真实对话，逐项回读验证）。
+// 后台执行：请求仅启动任务，页面轮询进度；关闭弹窗不影响服务端执行。
 $('btnTaskAutoAll').onclick = async () => {
-  if (!taskUID) return;
+  if (!taskUID || !taskCapabilities.automate) return;
+  const uid = taskUID;
   const btn = $('btnTaskAutoAll');
-  if (!confirm('将依次执行：补报对话事件、领取 Buddy、glm-5.2 对话、尝试上报。\n过程约 1-2 分钟（含真实对话），确认继续？')) return;
-  btn.disabled = true; btn.textContent = '执行中…';
+  btn.disabled = true; btn.textContent = '启动中…';
   try {
-    const r = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks/auto_all', { method: 'POST' });
-    const okN = (r.results || []).filter(x => x.status === 'done').length;
-    const skipN = (r.results || []).filter(x => x.status === 'skipped').length;
-    const errN = (r.results || []).filter(x => x.status === 'error').length;
-    toast(`执行完成：成功 ${okN} 项，跳过 ${skipN} 项${errN ? '，失败 ' + errN + ' 项' : ''}`, errN ? 'err' : 'ok');
-    console.log('auto_all results:', r.results);
-  } catch (e) { toast(e.message, 'err'); }
-  finally { btn.disabled = false; btn.textContent = '一键完成可自动任务'; loadTasks(); }
+    const r = await api('accounts/' + encodeURIComponent(uid) + '/tasks/auto_all', { method: 'POST' });
+    toast(r.started ? '后台任务已启动，关闭页面后仍会继续执行' : '该账号已有后台任务，已恢复进度显示', 'ok');
+    if (taskUID === uid) { taskJobGeneration++; renderAccountTaskJob(r.job); startAccountTaskJobPolling(uid); }
+    if (view === 'taskscenter') loadTaskJobs();
+  } catch (e) {
+    toast(e.message, 'err');
+    if (taskUID === uid) { btn.disabled = false; btn.textContent = '后台完成可自动任务'; }
+  }
 };
+
+function taskJobPresentation(job) {
+  const active = ['pending', 'running'].includes(job.status);
+  const labels = { pending: '排队中', running: '执行中', finished: '已结束', interrupted: '已中断', error: '执行失败' };
+  const trigger = { new_account: '新增账号', daily: '每日定时', manual: '手动启动', resume: '重启续跑' }[job.trigger] || job.trigger || '';
+  const progress = '处理 ' + (job.completed || 0) + ' / ' + (job.total || 0) + ' 项';
+  const summary = taskResultSummary(job.results || []);
+  const current = active && job.current_task ? '正在处理：' + job.current_task : '';
+  return { active, trigger, progress, label: labels[job.status] || job.status,
+    message: [labels[job.status] || job.status, progress, current, job.error || job.message, summary.message].filter(Boolean).join(' · '),
+    severity: job.status === 'error' || job.status === 'interrupted' ? 'err' : summary.severity };
+}
+
+function taskJobRows(job) {
+  return (job.results || []).map(item => qrowHTML({ code: item.task_code || '', title: item.title,
+    status: taskOutcomeStatus(item), message: item.message || item.claim_error,
+    prog: item.progress_after || item.progress_before || '' })).join('');
+}
+
+function renderAccountTaskJob(job) {
+  $('taskJobView').hidden = !job;
+  if (!job) return;
+  taskJobID = job.id;
+  const info = taskJobPresentation(job);
+  $('taskJobState').className = 'state ' + info.severity;
+  $('taskJobState').textContent = info.message;
+  $('taskJobResults').innerHTML = taskJobRows(job) || '<div class="hint">等待后台任务开始处理</div>';
+  $('btnTaskAutoAll').disabled = info.active;
+  $('btnTaskAutoAll').textContent = info.active ? '后台执行中…' : '后台完成可自动任务';
+}
+
+async function loadAccountTaskJob(uid) {
+  if (taskJobPolling === uid) return;
+  taskJobPolling = uid;
+  const generation = taskJobGeneration;
+  try {
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks/job');
+    if (taskUID !== uid || taskJobGeneration !== generation) return;
+    const previous = taskJobID;
+    renderAccountTaskJob(d.job);
+    if (d.job && taskJobPresentation(d.job).active) startAccountTaskJobPolling(uid);
+    else {
+      if (taskJobTimer) clearInterval(taskJobTimer);
+      taskJobTimer = null;
+      if (previous && d.job && previous === d.job.id) loadTasks();
+    }
+  } catch (e) {
+    if (taskUID === uid && taskJobGeneration === generation) { $('taskJobView').hidden = false; $('taskJobState').className = 'state err'; $('taskJobState').textContent = '后台进度查询失败：' + e.message; }
+  } finally {
+    if (taskJobPolling === uid) taskJobPolling = null;
+    if (taskUID && (taskUID !== uid || taskJobGeneration !== generation) && !taskJobTimer) loadAccountTaskJob(taskUID);
+  }
+}
+
+function startAccountTaskJobPolling(uid) {
+  if (taskJobTimer) clearInterval(taskJobTimer);
+  taskJobTimer = setInterval(() => { if (taskUID === uid) loadAccountTaskJob(uid); }, 3000);
+}
+
+async function loadTaskJobs() {
+  // go() 顶层调用也会进入此函数，首次 await 前不读取后声明的状态。
+  await Promise.resolve();
+  if (taskJobsLoading) return;
+  taskJobsLoading = true;
+  try {
+    const d = await api('tasks/jobs');
+    const jobs = d.jobs || [];
+    $('taskJobsSummary').textContent = jobs.length ? jobs.filter(j => taskJobPresentation(j).active).length + ' 个账号执行中' : '';
+    $('taskJobsNote').hidden = !!jobs.length && d.auto_enabled !== false;
+    $('taskJobsNote').textContent = d.auto_enabled === false ? '自动成长任务已关闭，可在账号任务中手动启动后台执行。' : '新增国区账号后自动执行，每日按成长任务排程继续推进；可在账号任务中手动启动。';
+    const expanded = new Set(Array.from($('taskJobsList').querySelectorAll('details[open][data-job-id]'), el => el.dataset.jobId));
+    $('taskJobsList').innerHTML = jobs.map(job => {
+      const info = taskJobPresentation(job);
+      return '<div class="qgroup task-job"><header><span class="nm">' + esc(job.nickname || job.uid.slice(0, 12)) + '</span>' +
+        '<span class="cnt">' + esc(info.trigger + ' · ' + info.label + ' · ' + info.progress) + '</span><span class="grow"></span>' +
+        '<button class="xs" data-job-uid="' + esc(job.uid) + '">查看任务</button></header>' +
+        '<div class="state job-summary ' + esc(info.severity) + '">' + esc(info.message) + '</div>' +
+        '<details class="job-results" data-job-id="' + esc(job.id) + '"' + (expanded.has(job.id) ? ' open' : '') + '><summary class="hint">查看结果 · 更新于 ' + esc(ago(job.updated_at)) + '</summary>' + taskJobRows(job) + '</details></div>';
+    }).join('');
+  } catch (e) {
+    $('taskJobsNote').hidden = false; $('taskJobsNote').textContent = '后台任务查询失败：' + e.message;
+  } finally { taskJobsLoading = false; }
+}
+$('btnTaskJobsReload').onclick = loadTaskJobs;
+$('taskJobsList').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-job-uid]');
+  if (b) openTasks(b.dataset.jobUid);
+});
 
 async function loadTasks() {
   if (!taskUID) return;
+  const uid = taskUID;
   const st = $('taskState'), tb = $('taskTable');
   st.hidden = false;
   st.className = 'state';
   st.innerHTML = '<span class="dots">查询中</span>';
   tb.hidden = true;
   try {
-    const d = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks');
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks');
+    if (taskUID !== uid) return;
+    taskCapabilities = d.capabilities || { accept: d.realm !== 'global', claim: d.realm !== 'global', automate: d.realm !== 'global' };
+    $('btnTaskAcceptAll').hidden = !taskCapabilities.accept;
+    $('btnTaskAutoAll').hidden = !taskCapabilities.automate;
+    $('taskNote').textContent = d.message || (d.realm === 'global' ? '国际区任务当前仅支持查询，请在官方客户端完成。' : '');
+    $('taskNote').hidden = !$('taskNote').textContent;
     const list = d.tasks || [];
     if (!list.length) {
       st.className = 'state';
@@ -1226,35 +1402,25 @@ async function loadTasks() {
     list.sort((a, b) => (a.claimed - b.claimed) || (b.claimable - a.claimable) || String(a.task_code).localeCompare(String(b.task_code)));
     $('taskBody').innerHTML = list.map(t => {
       // 进度：current 可能缺失（0 或被上游省略）——用 ?? 兜底，避免渲染成 "undefined / N"
-      const cur = t.current ?? 0, tgt = t.target ?? 0;
-      const prog = tgt ? cur + ' / ' + tgt : (tgt === 0 && cur > 0 ? String(cur) : '—');
-      const parts = [];
-      if (t.credit) parts.push('+' + t.credit + ' 分');
-      if (t.energy) parts.push('+' + t.energy + ' 能');
-      if (t.reward_buddy) parts.push('Buddy');
-      const reward = parts.length ? parts.join(' ') : '—';
-      const badge = t.claimed ? '<span class="tag ok">已领取</span>'
-        : t.claimable ? '<span class="tag warn">可领取</span>'
-        : t.locked ? '<span class="tag mute">未解锁</span>'
-        : t.accept_status === 'accepted' ? '<span class="tag mute">进行中</span>'
-        : '<span class="tag mute">未接受</span>';
-      const acted = t.claimed || t.locked ? ''
-        : t.claimable ? '<button class="xs primary" data-t="claim" data-c="' + esc(t.task_code) + '">领取</button>'
-        : AUTO_TASKS[t.task_code] ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(AUTO_TASKS[t.task_code]) + '">一键完成</button>'
-        : t.accept_status === 'accepted' ? ''
-        : '<button class="xs" data-t="accept" data-c="' + esc(t.task_code) + '">接受</button>';
+      const row = taskRowPresentation(t, taskCapabilities);
+      const badge = '<span class="tag ' + (t.claimed ? 'ok' : t.claimable ? 'warn' : 'mute') + '">' + esc(row.state) + '</span>';
+      const acted = row.action ? '<button class="xs' + (row.action === 'accept' ? '' : ' primary') + '" data-t="' + row.action + '" data-c="' + esc(row.code) + '">' + ({ claim: '领取', auto: '一键完成', accept: '接受' }[row.action]) + '</button>' : '';
       // 操作指引（description/task_desc）挂 title 提示：如何完成交给用户看
       const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
       return '<tr title="' + esc(tip) + '"><td class="mark" aria-hidden="true"><i></i></td>' +
-        '<td class="who"><div class="nm">' + esc(t.title || t.task_code) + '</div><div class="id">' + esc(t.task_code) + (t.tag ? ' · ' + esc(t.tag) : '') + '</div></td>' +
-        '<td class="num">' + esc(prog) + '</td>' +
-        '<td class="num">' + esc(reward) + '</td>' +
+        '<td class="who"><div class="nm">' + esc(t.title || row.code) + '</div><div class="id">' + esc(row.code) + (t.tag ? ' · ' + esc(t.tag) : '') + '</div></td>' +
+        '<td class="num">' + esc(row.progress) + '</td>' +
+        '<td class="num">' + esc(row.reward) + '</td>' +
         '<td>' + badge + '</td>' +
         '<td class="acts">' + acted + '</td></tr>';
     }).join('');
     st.hidden = true;
     tb.hidden = false;
   } catch (e) {
+    if (taskUID !== uid) return;
+    taskCapabilities = { accept: false, claim: false, automate: false };
+    $('btnTaskAcceptAll').hidden = true;
+    $('btnTaskAutoAll').hidden = true;
     st.className = 'state err';
     st.textContent = e.message;
   }
@@ -1264,6 +1430,7 @@ $('taskBody').addEventListener('click', async ev => {
   const b = ev.target.closest('button[data-t]');
   if (!b || !taskUID) return;
   const kind = b.dataset.t, code = b.dataset.c;
+  if (!code || !(kind === 'auto' ? taskCapabilities.automate : taskCapabilities[kind])) return;
   b.disabled = true;
   try {
     if (kind === 'auto') {
@@ -1272,17 +1439,9 @@ $('taskBody').addEventListener('click', async ev => {
       const r = await api('accounts/' + encodeURIComponent(taskUID) + '/tasks/auto', {
         method: 'POST', body: JSON.stringify({ task_code: code })
       });
-      if (r.skipped) {
-        toast(r.message || '已跳过', 'ok');
-      } else {
-        const advanced = r.progress_before !== r.progress_after;
-        let msg = r.message || '已执行';
-        if (r.progress_after) msg += `（进度 ${r.progress_before} → ${r.progress_after}）`;
-        if (r.claimed) msg += '，奖励已自动到账';
-        else if (r.claimable) msg += r.claim_error ? '，可点「领取」重试' : '';
-        else if (r.attempt && !advanced) msg += '；进度未动，该任务可能需要官方客户端';
-        toast(msg, (r.claimed || advanced) ? 'ok' : 'err');
-      }
+      const status = taskOutcomeStatus(r);
+      const severity = status === 'done' ? 'ok' : status === 'error' || status === 'claim_pending' ? 'err' : '';
+      toast(r.message || taskResultSummary([r]).message, severity);
       loadOverview(true);
     } else {
       const path = 'accounts/' + encodeURIComponent(taskUID) + '/tasks/' + (kind === 'claim' ? 'claim' : 'accept');
@@ -1561,7 +1720,7 @@ $('btnScanAll').onclick = async () => {
   b.disabled = true; b.textContent = '扫描中…';
   try {
     const d = await api('tasks/scan_all', { method: 'POST' });
-    renderQueue(groupItems(d), null, '没有待办任务 🎉', '全部账号的成长任务与开学季活动都已完成，明日再来。');
+    renderQueue(groupItems(d), null, '未发现可自动执行的待办', '当前扫描范围没有可自动执行的任务；跳过和扫描失败的账号会单独列出。');
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; b.textContent = '扫描待办'; }
 };
@@ -1572,7 +1731,11 @@ $('btnRunQueue').onclick = async () => {
   b.disabled = true; b.textContent = '启动中…';
   try {
     const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc }) });
-    if (!r.started) { toast(r.message || '没有待办任务', 'ok'); return; }
+    if (!r.started) {
+      if (r.scan_accounts) renderQueue(groupItems({ accounts: r.scan_accounts }), null, '未启动任务队列', r.message || '没有可自动执行的待办');
+      toast(r.message || '没有可自动执行的待办', r.scan_error_count ? 'err' : '');
+      return;
+    }
     lastQueueSeq = r.seq || 0;
     toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
     startQueuePolling();
@@ -1588,21 +1751,28 @@ function groupItems(d) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
       rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan' });
     }
+    if (a.growth_error) rows.push({ kind: 'account', code: '', title: '扫描失败', status: 'error', message: a.growth_error });
+    if (a.skipped) rows.push({ kind: 'account', code: '', title: '已跳过', status: 'skipped', message: a.skip_reason || '该账号不适用当前自动任务' });
     if (rows.length) groups.push({ uid: a.uid, nick: a.nickname, rows });
   }
   return groups;
 }
-const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行' };
+const ST_WORDS = { done: '完成', running: '执行中', error: '失败', skipped: '跳过', pending: '排队', scan: '待执行', awaiting_progress: '等待计分', claim_pending: '领奖待重试', accepted: '已接受' };
+function taskProgressLabel(value) {
+  const progress = String(value ?? '').trim();
+  return /^\d+(?:\s*\/\s*\d+)?$/.test(progress) ? progress : '—';
+}
 function qrowHTML(it) {
   const isSchool = it.kind === 'school';
-  const title = isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
+  const title = it.title || (isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code));
   const dotCls = it.status === 'scan' ? 'wait' : it.status === 'running' ? 'run' : it.status === 'error' ? 'err' : it.status === 'skipped' ? 'skip' : it.status === 'done' ? 'done' : 'wait';
   const stWord = it.status === 'scan' ? '待执行' : (ST_WORDS[it.status] || it.status);
+  const progress = taskProgressLabel(it.prog);
   return '<div class="qrow" title="' + esc(it.message || '') + '">' +
     '<span class="code">' + esc(it.code) + '</span>' +
     '<span class="name"><span class="t">' + esc(title) + '</span>' + (isSchool ? '<span class="tag mute">开学季</span>' : '') + '</span>' +
-    '<span class="prog">' + esc(it.prog || '') + '</span>' +
-    '<span class="st"><span class="qdot ' + dotCls + '"></span>' + stWord + '</span>' +
+    '<span class="prog" title="' + esc(progress) + '">' + esc(progress) + '</span>' +
+    '<span class="st"><span class="qdot ' + dotCls + '"></span>' + esc(stWord) + '</span>' +
     '<span class="msg">' + esc(it.message || '') + '</span>' +
     '</div>';
 }
@@ -1621,16 +1791,18 @@ function renderQueue(groups, progress, emptyTitle, emptyDesc) {
   let total = 0;
   list.innerHTML = groups.map(g => {
     total += g.rows.length;
-    return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + g.rows.length + ' 项待办</span></header>' +
+    const tasks = g.rows.filter(row => row.kind !== 'account').length;
+    return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || g.uid.slice(0, 12)) + '</span><span class="cnt">' + (tasks ? tasks + ' 项任务' : '账号状态') + '</span></header>' +
       g.rows.map(qrowHTML).join('') + '</div>';
   }).join('');
-  $('qcSummary').textContent = total + ' 项';
+  const taskCount = groups.reduce((sum, group) => sum + group.rows.filter(row => row.kind !== 'account').length, 0);
+  $('qcSummary').textContent = taskCount + ' 项任务' + (total > taskCount ? ' · ' + (total - taskCount) + ' 条账号状态' : '');
   updateProgress(progress);
 }
 function updateProgress(q) {
   if (!q || !q.items) { $('qProg').hidden = true; return; }
   const total = q.items.length;
-  const done = q.items.filter(it => it.status === 'done' || it.status === 'error' || it.status === 'skipped').length;
+  const done = q.items.filter(it => ['done', 'error', 'skipped', 'awaiting_progress', 'claim_pending'].includes(it.status)).length;
   $('qProg').hidden = false;
   $('qBarFill').style.width = (total ? Math.round(done / total * 100) : 0) + '%';
   $('qProgText').textContent = (q.running ? '执行中 ' : '已结束 ') + done + ' / ' + total;
@@ -1664,12 +1836,14 @@ function startQueuePolling() {
     // 回写视图——曾把用户刚点开的「扫描待办」结果在下一个 tick 冲掉。
     renderQueue(groupsFromQueue(q.items || []), q);
     clearInterval(queueTimer); queueTimer = null;
-    toast('任务队列执行结束', 'ok');
+    const summary = taskResultSummary(q.items || []);
+    toast('任务队列已结束：' + summary.message, summary.severity);
   }, 3000);
 }
 // reattachQueueView 切回任务中心视图时恢复队列进度：仅当本页启动的队列仍在
 // 执行才重新开轮询（残留态/别页队列不接管——视图不被旧结果冲掉）。
 function reattachQueueView() {
+  loadTaskJobs();
   // 全程异步：go() 在顶层（app.js ~143 行）被调用时，本文件下方 let/const
   //（queueTimer/lastQueueSeq 等）尚未初始化——同步读取即 TDZ ReferenceError
   // 使整个脚本中断。await 之后才碰它们（旧 pollQueueOnce 正是靠开头的 await

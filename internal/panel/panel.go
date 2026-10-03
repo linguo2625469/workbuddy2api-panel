@@ -36,10 +36,12 @@ type Config struct {
 	Pool      *pool.Pool
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
-	AuthDir   string               // OAuth 登录完成后凭证落盘目录
-	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
-	RedisMode string               // "upstash" / "noop"，仅观测透出
-	Version   string               // 面板版本号（展示用）
+	// AutoTasksEnabled 与成长任务开关共用热配置；nil 时只允许手动启动后台任务。
+	AutoTasksEnabled func() bool
+	AuthDir          string // OAuth 登录完成后凭证落盘目录
+	APIKey           string // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
+	RedisMode        string // "upstash" / "noop"，仅观测透出
+	Version          string // 面板版本号（展示用）
 
 	// Live 运行期可变配置（在线改配置立即生效）。
 	Live *livecfg.Holder
@@ -90,6 +92,9 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// 持久化的账号后台任务（taskjobs.go），由 main 管理生命周期。
+	taskJobs *taskJobManager
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -172,6 +177,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
+	p.mux.HandleFunc("GET /panel/api/tasks/jobs", p.withAuth(p.taskJobsHandler))
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks/job", p.withAuth(p.taskJobStatus))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
 	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
 	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
@@ -250,7 +257,7 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
 func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot(), "archive_error": p.logs.ArchiveError()})
 }
 
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
@@ -483,6 +490,16 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
+	if a.IsGlobal() {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"realm":        "global",
+			"skipped":      true,
+			"skip_reason":  "国际区账号不适用国内区签到",
+			"checkin_done": false,
+		})
+		return
+	}
 	checkinMsg := ""
 	checkinDone := false
 	if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
@@ -496,9 +513,12 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Pool.NoteCheckinDone(uid)
 		checkinDone = true
 	}
-	resp := map[string]any{"ok": true, "checkin_done": checkinDone}
+	resp := map[string]any{"ok": checkinDone, "realm": "cn", "checkin_done": checkinDone}
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
+		if !checkinDone {
+			resp["checkin_error"] = checkinMsg
+		}
 	}
 	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
@@ -639,11 +659,11 @@ func (p *Panel) syncNicknames() {
 		return
 	}
 	var (
-		mu       sync.Mutex
-		updated  int
-		failed   int
-		sem      = make(chan struct{}, 3)
-		wg       sync.WaitGroup
+		mu      sync.Mutex
+		updated int
+		failed  int
+		sem     = make(chan struct{}, 3)
+		wg      sync.WaitGroup
 	)
 	for _, j := range jobs {
 		wg.Add(1)

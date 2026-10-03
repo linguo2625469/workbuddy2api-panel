@@ -420,6 +420,43 @@ func applyEnv(c *Config) {
 	}
 }
 
+// EnvironmentManagedFields names fields whose startup environment overrides the file.
+// Values are never returned: the panel uses these names to prevent ineffective edits.
+func (c *Config) EnvironmentManagedFields() []string {
+	fields := []struct{ env, path, kind string }{
+		{"WB2A_LISTEN", "listen", ""}, {"WB2A_API_KEY", "api_key", ""},
+		{"WB2A_AUTH_DIR", "auth_dir", ""}, {"WB2A_STATE_FILE", "state_file", ""},
+		{"WB2A_SOFT_RATE", "cooldown.soft_rate", ""}, {"WB2A_SOFT_RATE_MAX", "cooldown.soft_rate_max", ""},
+		{"WB2A_TIMEOUT_SECONDS", "upstream.timeout_seconds", "int"}, {"WB2A_HEADER_TIMEOUT_SECONDS", "upstream.header_timeout_seconds", "int"},
+		{"WB2A_IDLE_TIMEOUT_SECONDS", "upstream.idle_timeout_seconds", "int"}, {"WB2A_USER_AGENT", "upstream.user_agent", ""},
+		{"WB2A_CLIENT_VERSION", "upstream.client_version", ""}, {"WB2A_CLI_VERSION", "upstream.cli_version", ""},
+		{"WB2A_CLIENT_NAME", "upstream.client_name", ""}, {"WB2A_DEVICE_TOKEN", "upstream.device_token", ""},
+		{"WB2A_DEVICE_TOKEN_FILE", "upstream.device_token_file", ""}, {"WB2A_PASSTHROUGH_IP", "upstream.passthrough_ip", "bool"},
+		{"WB2A_SANITIZE_FINGERPRINTS", "features.sanitize_blacklist_fingerprints", "bool"},
+		{"WB2A_PROMPT_MODE", "prompt.mode", ""}, {"WB2A_PROMPT_FILE", "prompt.file", ""},
+		{"WB2A_EXPIRING_SOON", "pool.expiring_soon", ""}, {"WB2A_PREFER_EXPIRING", "pool.prefer_expiring", "bool"},
+	}
+	var out []string
+	for _, field := range fields {
+		value := os.Getenv(field.env)
+		if value == "" {
+			continue
+		}
+		if field.kind == "int" {
+			if _, err := strconv.Atoi(value); err != nil {
+				continue
+			}
+		}
+		if field.kind == "bool" {
+			if _, err := strconv.ParseBool(value); err != nil {
+				continue
+			}
+		}
+		out = append(out, field.path)
+	}
+	return out
+}
+
 func (c *Config) normalize() error {
 	var err error
 	if c.Panel.PackageDetailLimit <= 0 {

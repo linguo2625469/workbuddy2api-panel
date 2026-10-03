@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"sync"
 	"syscall"
 	"time"
 
@@ -257,18 +259,20 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	var configSaveMu sync.Mutex
 	pn := panel.New(panel.Config{
-		Pool:        p,
-		Usage:       rec,
-		RequestLog:  requestLog,
-		Upstream:    up,
-		Scheduler:   sch,
-		AuthDir:     cfg.AuthDir,
-		APIKey:      cfg.APIKey,
-		RedisMode:   redisMode,
-		StickyCount: sessCount,
-		Version:     appVersion,
-		Live:        live,
+		Pool:             p,
+		Usage:            rec,
+		RequestLog:       requestLog,
+		Upstream:         up,
+		Scheduler:        sch,
+		AutoTasksEnabled: sch.GrowthEnabled,
+		AuthDir:          cfg.AuthDir,
+		APIKey:           cfg.APIKey,
+		RedisMode:        redisMode,
+		StickyCount:      sessCount,
+		Version:          appVersion,
+		Live:             live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -277,11 +281,15 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			configSaveMu.Lock()
+			defer configSaveMu.Unlock()
+			return saveConfig(raw, *cfgPath, live, p, up, sch, cfg)
 		},
 	})
-	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
-	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
+	if err := pn.Logs().SetTaskArchive(stateSibling(cfg.StateFile, "task-logs.json")); err != nil {
+		log.Printf("WARN: task log archive: %v", err)
+	}
+	// 每日将国区账号交给持久化后台任务；账号内互斥，返回不等待上游操作。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
@@ -309,6 +317,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := pn.StartTaskJobs(ctx, stateSibling(cfg.StateFile, "task-jobs.json")); err != nil {
+		log.Fatalf("task jobs: %v", err)
+	}
+	defer pn.StopTaskJobs()
+	pn.ResumeTaskJobs()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 
@@ -412,11 +425,19 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, running ...*Config) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read current config: %w", err)
+	}
+	previous, err := ParseConfig(oldRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse current config: %w", err)
+	}
+	baseline := previous
+	if len(running) > 0 && running[0] != nil {
+		baseline = running[0]
 	}
 	var cur, incoming map[string]any
 	if err := json.Unmarshal(oldRaw, &cur); err != nil {
@@ -430,6 +451,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
+		return nil, err
+	}
+	// Environment overrides have the same precedence on save as on startup.
+	applyEnv(newCfg)
+	if err := newCfg.normalize(); err != nil {
 		return nil, err
 	}
 
@@ -498,29 +524,44 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 
-	return restartRequiredFields(newCfg), nil
+	return restartRequiredFields(baseline, newCfg), nil
 }
 
-// restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
-// 恒返回完整清单中的"与当前进程装配期依赖相关"的项——面板据此提示用户。
-func restartRequiredFields(c *Config) []string {
+// restartRequiredFields 比较运行中装配值与新配置，也保留此前尚未重启的改动。
+func restartRequiredFields(current, next *Config) []string {
 	var out []string
-	// 这些字段在进程内被监听地址/HTTP client/目录句柄等装配期对象捕获。
-	if c.Listen != "" {
-		out = append(out, "listen")
+	changed := func(name string, before, after any) {
+		if !reflect.DeepEqual(before, after) {
+			out = append(out, name)
+		}
 	}
-	if c.AuthDir != "" {
-		out = append(out, "auth_dir")
-	}
-	if c.StateFile != "" {
-		out = append(out, "state_file")
-	}
-	out = append(out, "upstream.timeout_seconds", "upstream.header_timeout_seconds", "upstream.idle_timeout_seconds")
-	if c.Upstash.URL != "" || c.Upstash.Token != "" {
-		out = append(out, "upstash")
-	}
-	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
-	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
+	changed("listen", current.Listen, next.Listen)
+	changed("auth_dir", current.AuthDir, next.AuthDir)
+	changed("state_file", current.StateFile, next.StateFile)
+	changed("upstream.timeout_seconds", current.Upstream.TimeoutSeconds, next.Upstream.TimeoutSeconds)
+	changed("upstream.header_timeout_seconds", current.Upstream.HeaderTimeoutSeconds, next.Upstream.HeaderTimeoutSeconds)
+	changed("upstream.idle_timeout_seconds", current.Upstream.IdleTimeoutSeconds, next.Upstream.IdleTimeoutSeconds)
+	changed("upstream.user_agent", current.Upstream.UserAgent, next.Upstream.UserAgent)
+	changed("upstream.client_version", current.Upstream.ClientVersion, next.Upstream.ClientVersion)
+	changed("upstream.cli_version", current.Upstream.CliVersion, next.Upstream.CliVersion)
+	changed("upstream.client_name", current.Upstream.ClientName, next.Upstream.ClientName)
+	changed("upstream.device_token", current.Upstream.DeviceToken, next.Upstream.DeviceToken)
+	changed("upstream.device_token_file", current.Upstream.DeviceTokenFile, next.Upstream.DeviceTokenFile)
+	changed("upstream.passthrough_ip", current.Upstream.PassthroughIP, next.Upstream.PassthroughIP)
+	changed("global.enabled", current.Global.Enabled, next.Global.Enabled)
+	changed("global.chat_base", current.Global.ChatBase, next.Global.ChatBase)
+	changed("global.billing_base", current.Global.BillingBase, next.Global.BillingBase)
+	changed("prompt.mode", current.Prompt.Mode, next.Prompt.Mode)
+	changed("prompt.file", current.Prompt.File, next.Prompt.File)
+	changed("prompt.text", current.PromptText, next.PromptText)
+	changed("upstash.url", current.Upstash.URL, next.Upstash.URL)
+	changed("upstash.token", current.Upstash.Token, next.Upstash.Token)
+	changed("session_sticky.enabled", current.SessionSticky.Enabled, next.SessionSticky.Enabled)
+	changed("session_sticky.ttl", current.SessionTTL, next.SessionTTL)
+	changed("session_sticky.gc_interval", current.SessionGCInterval, next.SessionGCInterval)
+	changed("logging.request_archive_enabled", current.Logging.RequestArchiveEnabled, next.Logging.RequestArchiveEnabled)
+	changed("logging.request_retention_days", current.Logging.RequestRetentionDays, next.Logging.RequestRetentionDays)
+	changed("logging.request_archive_max_mb", current.Logging.RequestArchiveMaxMB, next.Logging.RequestArchiveMaxMB)
 	return out
 }
 
