@@ -67,6 +67,8 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
+| 🧩 **Responses API** | 原生 `POST /v1/responses`（Codex CLI / Codex App）：请求/响应双向翻译，custom（freeform）与 namespace 工具适配 |
+| 🔑 **多 API Key** | 每把 Key 可限定模型（`*` 通配）与出口区域（cn/global）；越权请求本机 400，不消耗额度 |
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题），账号运维 / 模型档位查询 / 在线改配置（热生效）/ 运行日志 / 积分任务，见 [Web 管理面板](#-web-管理面板) |
 
@@ -148,6 +150,52 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
 
+## 🧩 Responses API（Codex / Codex App）
+
+除 Chat Completions 外，网关原生提供 **Responses API**（`POST /v1/responses`），供
+Codex CLI / Codex App 这类走 Responses 协议的客户端直接接入。两条协议共享同一套选号、
+轮转、提示词改写与错误处置管线（`chatPipeline` + 适配器），只在回程做协议翻译。
+
+- **请求翻译**：`instructions` → system；`input` 项（message / reasoning /
+  function_call(_output) / custom_tool_call(_output) / agent_message）→ Chat messages，
+  并保持工具调用与结果的配对；
+- **custom（freeform）工具**（如 Codex 的 `apply_patch`）：降级为单 `input` 参数的
+  function 送上上游，回程还原成 `custom_tool_call`。不这样做的话上游没有 freeform 概念，
+  模型会把载荷当普通文本吐出来，客户端永远收不到工具调用；
+- **namespace 工具**（新版 Codex App 的 MCP / 插件工具组）：展开成扁平 function 送上游，
+  回程在 `response.output_item.added` 事件就补回 `namespace` 字段——客户端是按
+  `(name, namespace)` 二元组派发执行器的，晚补（只在 done 补）已经错过派发时机；
+- **流式事件序列**：`response.created` → `response.in_progress` → `output_item.added`
+  → `output_text.delta` / `reasoning_summary_text.delta` / `function_call_arguments.delta` /
+  `custom_tool_call_input.delta` → 对应 `.done` → `response.completed`；
+- **非流式**（`stream:false`）返回完整 response 对象，usage 映射为
+  `input_tokens` / `output_tokens` / `total_tokens`（含 `cached_tokens`、`reasoning_tokens`）。
+
+```bash
+curl http://127.0.0.1:7863/v1/responses \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-6-astra","input":"hello","stream":false}'
+```
+
+## 🔑 多 API Key（模型白名单 + 出口绑定）
+
+`config.json` 配置 `api_keys` 后按多密钥鉴权：每个客户端 / 用途各持一把钥匙，各自限定
+可调用的模型与出口区域——越权请求在本机直接 400，**不送上上游、不消耗任何额度**
+（用来挡掉桌面客户端的后台请求偷偷调用付费模型）。
+
+```json
+"api_keys": [
+  {"key": "sk-codex-xxxx", "name": "Codex App", "models": ["gpt-6-astra", "gpt-5.6-sol"], "realm": "global"},
+  {"key": "sk-dsh-xxxx",   "name": "DSH",       "models": ["deepseek*", "glm-*"]},
+  {"key": "sk-phone-xxxx", "name": "手机端",     "models": []}
+]
+```
+
+- `models`：允许的模型，支持 `*` / `?` 通配；留空 = 不限制；
+- `realm`：`cn` / `global`，绑定该 Key 的出口区域（覆盖模型名上的 `[realm:]` 前缀）；
+- `enabled`：缺省 `true`；`key` 重复或为空会在启动时报错，不会静默忽略；
+- 未配置 `api_keys` 时完全回落顶层 `api_key` 单密钥语义（老配置零变化）；
+- 面板保存其他配置时按深合并保留 `api_keys`，不会被表单洗掉。
 ## 🆚 与上游的差异
 
 本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
@@ -586,6 +634,7 @@ http://127.0.0.1:7863/panel/
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/responses` | Bearer（`api_key` 非空时） | Responses API（Codex CLI / Codex App）；流式事件流与非流式对象；与 Chat 路径共享选号/轮转/错误处置 |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |

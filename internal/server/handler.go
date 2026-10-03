@@ -2,9 +2,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/responses"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
@@ -31,6 +34,9 @@ type Config struct {
 	Upstream  *upstream.Client
 	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
 	MaxRotate int    // 单请求最多换号次数，默认 3
+	// Keyring 多 API Key 匹配表（可选；nil = 回落单 APIKey 语义）。
+	// 与 Live 同时给出时 Live 优先（面板热改）。
+	Keyring *httpauth.Keyring
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -80,6 +86,7 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	}
 	return livecfg.Snapshot{
 		APIKey:           h.cfg.APIKey,
+		Keyring:          h.cfg.Keyring,
 		SoftCooldown:     h.cfg.SoftCooldown,
 		RecordClientInfo: h.cfg.RecordClientInfo,
 	}
@@ -133,6 +140,7 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -167,7 +175,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+		live := h.loadLive()
+		// 多 API Key：命中哪一把决定该请求的模型白名单与出口绑定。
+		// 未配置 api_keys（Keyring 为 nil）时完全回落单密钥语义，老配置零变化。
+		if live.Keyring != nil {
+			if spec, ok := live.Keyring.Match(r); ok {
+				next(w, r.WithContext(withKeySpec(r.Context(), spec)))
+				return
+			}
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		if !httpauth.VerifyBearer(r, live.APIKey) {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
@@ -499,7 +518,38 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// chatCompletions 处理 POST /v1/chat/completions：Chat 协议原样透传。
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
+	h.chatPipeline(w, r, chatAdapter{})
+}
+
+// responses 处理 POST /v1/responses：把 Responses 请求翻译成 Chat 请求后复用
+// chatPipeline（选号 / 轮转 / 提示词改写 / 错误处置 / 用量记账完全共享），
+// 回程再由 responsesAdapter 翻译回 Responses 事件与对象。
+func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
+		return
+	}
+	chatBody, meta, err := responses.TranslateRequest(body)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	// 用翻译后的 Chat 请求体替换原始 body：管线其余部分只认 Chat 形态。
+	r2 := r.Clone(r.Context())
+	r2.Body = io.NopCloser(bytes.NewReader(chatBody))
+	// 回程 model 用裸名：realm 前缀是网关侧路由协议，不属于客户端可见的响应。
+	model := meta.Model
+	if _, bare := resolveModel(model); bare != "" {
+		model = bare
+	}
+	h.chatPipeline(w, r2, responsesAdapter{meta: meta, model: model})
+}
+
+// chatPipeline 是两条协议共用的主管线：读体 → 选号 → 改写 → 上游调用 → 轮转重试。
+func (h *Handler) chatPipeline(w http.ResponseWriter, r *http.Request, adapter streamAdapter) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
@@ -537,6 +587,25 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer st.done()
 
+	// 多 API Key 的第二半：模型白名单与出口绑定。
+	// 白名单不命中 → 本地 400，不送上游、不消耗额度（这正是分 Key 的目的：
+	// 桌面客户端的后台请求偷偷调用付费模型时，在本机就被挡下）。
+	if spec, ok := keySpecFrom(r.Context()); ok {
+		if !httpauth.MatchModel(spec.Models, bareModel) {
+			writeOpenAIError(w, http.StatusBadRequest, "model_not_allowed",
+				fmt.Sprintf("model %q is not allowed for this API key", bareModel))
+			st.status = http.StatusBadRequest
+			st.outcome = reqlog.OutcomeHTTPError
+			return
+		}
+		if spec.Realm != "" && spec.Realm != realm {
+			// 出口绑定：Key 决定走国内还是国际域（覆盖模型前缀的 realm）。
+			realm = spec.Realm
+			if h.cfg.Upstream != nil {
+				modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+			}
+		}
+	}
 	tried := map[string]bool{}
 	var lastErr error
 
@@ -897,11 +966,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// gateway_hint（SSE）：成功状态 200 已开流，中途 error 帧透传时附加
 			// hint 字段（hintFn 惰性求值——正常流零开销，只有真撞到 error 帧才
 			// 组装请求上下文做判定）。
-			sErr := upstream.StreamHint(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
+			sErr := adapter.WriteStream(w, stats, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
 			}))
 			switch {
-			case upstream.IsEmptyStreamError(sErr):
+			case adapter.EmptyStream(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
 				// 兜底（HTTP 头已发出只能 200），但这是上游缺陷不是成功——日志/
 				// 状态收敛到 502 观测，与非流式 Aggregate 空流→502 upstream_parse
@@ -967,7 +1036,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
 		}
-		writeJSON(w, http.StatusOK, resp)
+		adapter.WriteNonStream(w, resp)
 		st.status = http.StatusOK
 		st.outcome = reqlog.OutcomeSuccess
 		st.toks = completionTokens(resp)

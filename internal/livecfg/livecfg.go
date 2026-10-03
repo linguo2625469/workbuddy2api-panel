@@ -11,6 +11,8 @@ package livecfg
 import (
 	"sync/atomic"
 	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 )
 
 // Snapshot 一次读取的不可变配置视图。
@@ -19,6 +21,9 @@ type Snapshot struct {
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+	// Keyring 多 API Key 匹配表（nil = 未启用多 Key，回落单密钥 APIKey）。
+	// 热生效：面板改配置后整体替换快照，无需重启。
+	Keyring *httpauth.Keyring
 }
 
 // Holder 原子持有当前快照。
