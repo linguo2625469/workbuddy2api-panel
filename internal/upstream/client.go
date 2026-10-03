@@ -1182,7 +1182,13 @@ func (m dynModelEntry) modelInfo() ModelInfo {
 // 来源：harness buddy.ts:547-555。三类规则：
 //   - id 前缀 nes-/completion-/codewise-：嵌入/补全/代码专用模型，选了报 code=11102。
 //   - maxOutputTokens ≤ 256：tiny 输出非对话模型。
-//   - tags 含 text-to-image：图片生成模型，非本网关用途。
+//   - tags 含生成类标签（图片/视频）：生成模型走各自专用端点，作为对话模型
+//     选上去只会报 11102，非本网关用途。
+//
+// 生成类标签随上游扩充：早期只有 text-to-image，桌面端目录（2026-10-02 实测）
+// 另有 text-to-video / image-to-video（seedance 系列）与 image-to-image
+// （gpt-image 系列）——后者已由 text-to-image 覆盖，此处补齐视频两类。
+// 注意本函数 CN 与 global 共用，新增标签对两域同时生效。
 func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 	id = strings.ToLower(strings.TrimSpace(id))
 	for _, p := range [...]string{"nes-", "completion-", "codewise-"} {
@@ -1194,7 +1200,8 @@ func nonChatModel(id string, maxOutputTokens int64, tags []string) bool {
 		return true
 	}
 	for _, t := range tags {
-		if t == "text-to-image" {
+		switch t {
+		case "text-to-image", "image-to-image", "text-to-video", "image-to-video":
 			return true
 		}
 	}
