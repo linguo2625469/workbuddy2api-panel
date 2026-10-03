@@ -159,22 +159,39 @@ func (c *Client) fetchGlobalModelsOnce(a *auth.Auth) (names []string, infos []Mo
 	return merged, infos
 }
 
+// desktopProbeUA /v3/config 第三路（桌面端形态）探测用的 UA。
+//
+// 为什么必须单独探这一路：该端点按 UA 家族下发不同目录，三族各有独有模型
+// （2026-10-03 实测，同一账号同一端点：CN IDE 19 / CLI 32 / 桌面端 54，
+// global 13 / 22 / 29）。global 侧 gpt-6-luna 只在桌面端目录出现，但请求实测
+// 可正常返回 200——只探 IDE + CLI 时它永远进不了 /v1/models。
+// 版本号升降不改结果（IDE 4.12→5.0、CLI 2.63→2.80 目录条数一致），故只补家族。
+//
+// 平台段固定用 CN 形态（`WorkBuddy`）：本次实测即该形态、两个 base 都返回最大目录；
+// defaultWorkBuddyUAFor 的 global 形态（`WorkBuddy AI`）未实测，不臆造。
+func (c *Client) desktopProbeUA() string {
+	return c.defaultWorkBuddyUAFor(nil)
+}
+
 // probeGlobalModels 发起一次 global 模型目录探测（v3-config-merge）：
-// /v3/config（主，IDE UA 完整能力版）与企业端点家族（/v2 → /console 兜底，补缺）
-// **并发**探测后并集合并。返回模型名列表（已合并、未再去重——去重在
-// fetchGlobalModelsOnce）、全字段 ModelInfo（对象形态；窄表为 nil）及 effort
-// 能力桶（supportedEfforts/defaultEffort，可为空）。合并口径：v3 条目为主
-// （credits 等字段以 v3 为准），企业端点只补 v3 缺失的模型 id；去重 key =
-// 模型 id，输出顺序稳定。两路全失败才返回错误（等价原「家族端点全非 2xx」
-// 负缓存语义）；单路失败降级为另一路结果 + warn 日志，互不拖累。
+// /v3/config（主，IDE / CLI / 桌面端**三种 UA 家族**并发探测取并集）与企业端点
+// 家族（/v2 → /console 兜底，补缺）**并发**探测后并集合并。返回模型名列表
+// （已合并、未再去重——去重在 fetchGlobalModelsOnce）、全字段 ModelInfo（对象
+// 形态；窄表为 nil）及 effort 能力桶（supportedEfforts/defaultEffort，可为空）。
+// 合并口径：v3 条目为主（credits 等字段以 v3 为准），企业端点只补 v3 缺失的
+// 模型 id；去重 key = 模型 id，输出顺序稳定。v3 与家族两路全失败才返回错误
+// （等价原「家族端点全非 2xx」负缓存语义）；单路失败降级为其余路结果 + warn
+// 日志，互不拖累。
 func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelInfo, efforts map[string][]string, defaults map[string]string, err error) {
 	type probeResult struct {
 		names []string
 		infos []ModelInfo
 		err   error
 	}
-	// probeV3 单次 /v3/config 探测（UA 参数化）。该端点对不同 UA 下发**不同模型集合**：
-	// IDE UA 与 CLI UA 各有独有模型（见 codeBuddyCLIUA 注释），故并发两路取并集。
+	// probeV3 单次 /v3/config 探测（UA 参数化）。该端点按 UA **家族**（客户端形态）
+	// 下发**不同模型集合**：IDE / CLI / 桌面端三族各有独有模型，故并发多路取并集。
+	// 实测（2026-10-03，同一账号同一端点）目录条数：CN 19 / 32 / 54，global 13 / 22 / 29；
+	// 版本号升降不改变结果，只有家族变。
 	probeV3 := func(ua string) chan probeResult {
 		ch := make(chan probeResult, 1)
 		go func() {
@@ -200,6 +217,9 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	}
 	v3IDECh := probeV3(codeBuddyIDEUA)
 	v3CLICh := probeV3(codeBuddyCLIUA)
+	// 第三路：桌面端形态。缺它就会漏掉仅桌面端下发的模型——global 侧 gpt-6-luna
+	// 即此例（目录里没有、实际可调用），用户侧表现为「模型列表不全」。
+	v3DesktopCh := probeV3(c.desktopProbeUA())
 	enterpriseCh := make(chan probeResult, 1)
 	go func() {
 		// 企业端点家族：/v2 首选 → /console 兜底（既有探活序，零回归）。
@@ -217,22 +237,39 @@ func (c *Client) probeGlobalModels(a *auth.Auth) (names []string, infos []ModelI
 	}()
 	v3IDE := <-v3IDECh
 	v3CLI := <-v3CLICh
+	v3Desktop := <-v3DesktopCh
 	enterprise := <-enterpriseCh
-	// v3 两路自合并：IDE 路字段权威（响应更大、单条字段更全），CLI 路只补缺失的模型 id。
-	// 单路成功即用该路；两路全失败才带 err 进入下游降级判断。
+	// v3 多路自合并：IDE 路字段权威（响应更大、单条字段更全），CLI 路与桌面路只补
+	// 缺失的模型 id。任一路成功即用其为主路；全失败才带 err 进入下游降级判断。
+	v3Probes := []struct {
+		label string
+		res   probeResult
+	}{
+		{"IDE-UA", v3IDE},
+		{"CLI-UA", v3CLI},
+		{"desktop-UA", v3Desktop},
+	}
+	var okProbes []probeResult
+	for _, p := range v3Probes {
+		if p.res.err != nil {
+			log.Printf("WARN: [upstream] global models: v3/config %s probe failed: %v", p.label, p.res.err)
+			continue
+		}
+		okProbes = append(okProbes, p.res)
+	}
 	var v3 probeResult
 	switch {
-	case v3IDE.err != nil && v3CLI.err != nil:
+	case len(okProbes) == 0:
+		// 三路全失败：err 非空，下游按既有「v3 失败」分支降级或负缓存。
 		v3 = probeResult{err: v3IDE.err}
-	case v3IDE.err != nil:
-		log.Printf("WARN: [upstream] global models: v3/config IDE-UA probe failed (CLI-UA only): %v", v3IDE.err)
-		v3 = v3CLI
-	case v3CLI.err != nil:
-		log.Printf("WARN: [upstream] global models: v3/config CLI-UA probe failed (IDE-UA only): %v", v3CLI.err)
-		v3 = v3IDE
+	case len(okProbes) == 1:
+		v3 = okProbes[0]
 	default:
-		vn, vi := mergeGlobalCatalog(v3IDE.names, v3IDE.infos, v3CLI.names, v3CLI.infos)
-		v3 = probeResult{names: vn, infos: vi}
+		names, infos := okProbes[0].names, okProbes[0].infos
+		for _, p := range okProbes[1:] {
+			names, infos = mergeGlobalCatalog(names, infos, p.names, p.infos)
+		}
+		v3 = probeResult{names: names, infos: infos}
 	}
 
 	if v3.err != nil && enterprise.err != nil {
