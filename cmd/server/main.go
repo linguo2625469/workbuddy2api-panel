@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -229,6 +230,7 @@ func main() {
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
+		Keyring:              buildKeyring(cfg),
 		SoftCooldown:         cfg.SoftRateDur,
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
@@ -474,6 +476,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	// 4) 热应用：能立即生效的字段全部应用，并列出仍需重启的字段。
 	live.Store(livecfg.Snapshot{
 		APIKey:               newCfg.APIKey,
+		Keyring:              buildKeyring(newCfg),
 		SoftCooldown:         newCfg.SoftRateDur,
 		SanitizeFingerprints: newCfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     newCfg.Logging.RequestClientInfo,
@@ -547,4 +550,24 @@ func mergedJSON(m map[string]any) []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// buildKeyring 把配置里的 api_keys 转成鉴权用的匹配表；未配置时返回 nil
+// （handler 据此回落单 api_key 语义）。
+func buildKeyring(cfg *Config) *httpauth.Keyring {
+	if cfg == nil || len(cfg.APIKeys) == 0 {
+		return nil
+	}
+	specs := make([]httpauth.KeySpec, 0, len(cfg.APIKeys))
+	for _, k := range cfg.APIKeys {
+		enabled := k.Enabled == nil || *k.Enabled
+		specs = append(specs, httpauth.KeySpec{
+			Key:     k.Key,
+			Name:    k.Name,
+			Models:  k.Models,
+			Realm:   k.Realm,
+			Enabled: enabled,
+		})
+	}
+	return httpauth.NewKeyring(specs)
 }

@@ -15,12 +15,29 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 )
 
+// APIKeyConfig 一条 API Key 的配置（多 Key 场景）。
+//
+// 配置后，每个客户端/用途可各持一把钥匙，并各自限定可调用的模型与出口区域：
+// 越权请求在网关本地 400，不送上上游、不消耗额度。未配置 api_keys 时回落
+// 顶层单 api_key 语义，老配置行为完全不变。
+type APIKeyConfig struct {
+	Key     string   `json:"key"`     // 密钥原文
+	Name    string   `json:"name"`    // 备注名（日志/报错用）
+	Models  []string `json:"models"`  // 允许的模型（* ? 通配；空 = 不限制）
+	Realm   string   `json:"realm"`   // 出口绑定："cn" / "global"；空 = 跟随请求
+	Enabled *bool    `json:"enabled"` // 缺省 true（nil = 启用）
+}
+
 // Config 顶层配置。
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+
+	// APIKeys 多 API Key 配置（可选）。非空时以本表鉴权，顶层 api_key 退居
+	// 面板/管理接口的后备密钥。
+	APIKeys []APIKeyConfig `json:"api_keys"`
 
 	Panel struct {
 		// PackageDetailLimit 积分构成页单账号默认展示的最近到期包数；<=0 回落 5。
@@ -421,6 +438,9 @@ func applyEnv(c *Config) {
 }
 
 func (c *Config) normalize() error {
+	if err := c.normalizeAPIKeys(); err != nil {
+		return err
+	}
 	var err error
 	if c.Panel.PackageDetailLimit <= 0 {
 		c.Panel.PackageDetailLimit = 5
@@ -611,6 +631,47 @@ func checkHourRange(field, switchKey string, hours []int) error {
 		if h < 0 || h > 23 {
 			return fmt.Errorf("%s: %d 不是合法小时（0-23）；如要关闭该任务请设 schedule.%s=false", field, h, switchKey)
 		}
+	}
+	return nil
+}
+
+// normalizeAPIKeys 校验并规范化多 API Key 配置。
+//
+// 规则：
+//   - key 为空且启用中的条目直接报错（避免"配了但永远匹配不上"的哑配置）；
+//   - realm 只接受 "" / "cn" / "global"（大小写不敏感，落盘统一小写）；
+//   - 重复 key 报错（同一把钥匙两条规则会产生歧义）。
+func (c *Config) normalizeAPIKeys() error {
+	seen := map[string]bool{}
+	for i := range c.APIKeys {
+		k := &c.APIKeys[i]
+		k.Key = strings.TrimSpace(k.Key)
+		k.Name = strings.TrimSpace(k.Name)
+		k.Realm = strings.ToLower(strings.TrimSpace(k.Realm))
+		switch k.Realm {
+		case "", "cn", "global":
+		default:
+			return fmt.Errorf("api_keys[%d] (%s): realm 必须是 cn / global 或留空，当前 %q", i, k.Name, k.Realm)
+		}
+		enabled := k.Enabled == nil || *k.Enabled
+		if !enabled {
+			continue
+		}
+		if k.Key == "" {
+			return fmt.Errorf("api_keys[%d] (%s): key 不能为空", i, k.Name)
+		}
+		if seen[k.Key] {
+			return fmt.Errorf("api_keys[%d] (%s): key 与前面的条目重复", i, k.Name)
+		}
+		seen[k.Key] = true
+		// 模型模式去空白；全空白的模式视为未配置。
+		cleaned := make([]string, 0, len(k.Models))
+		for _, m := range k.Models {
+			if m = strings.TrimSpace(m); m != "" {
+				cleaned = append(cleaned, m)
+			}
+		}
+		k.Models = cleaned
 	}
 	return nil
 }
