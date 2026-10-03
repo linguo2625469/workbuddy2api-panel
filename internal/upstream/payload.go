@@ -42,6 +42,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	// /console 同源）只认 max_tokens——别名透传会被上游忽略后回落默认输出上限
 	// （实测 32000），长流任务被截。
 	translateMaxCompletionTokens(obj)
+	clampGPTMinMaxTokens(obj)
 	// stream_options 仅当 body 未显式带时补 {include_usage: true}（D7）：
 	// 官方 CLI 流式必发该字段，上游据此在末帧返回 usage 用量；显式带则不覆盖。
 	if _, has := obj["stream_options"]; !has {
@@ -115,6 +116,38 @@ func translateMaxCompletionTokens(obj map[string]any) {
 		if v > 0 {
 			obj["max_tokens"] = int64(v)
 		}
+	}
+}
+
+// gptMinMaxTokens GPT 系上游接受的 max_tokens 下限。
+const gptMinMaxTokens = 16
+
+// clampGPTMinMaxTokens 把 GPT 系模型过小的 max_tokens 抬到下限。
+//
+// 背景：上游 GPT 系（实测 gpt-6-sol / gpt-6-luna / gpt-5.6-sol）对 max_tokens < 16
+// 一律 400 code=11133 model_param_invalid（15 拒、16 过，同号同 body 对照）；hy4 等
+// 非 GPT 模型无此限制。Claude Code 切模型时发 max_tokens 极小的探针，全号轮转同样
+// 被拒 → 客户端 503，模型永远切不过去。账号与 body 其余部分无关，换号无用，只能
+// 在发送前修。抬到下限只放宽输出上限、不改语义；未携带字段 / 非数值 / 已达下限一律不动。
+func clampGPTMinMaxTokens(obj map[string]any) {
+	model, _ := obj["model"].(string)
+	if !strings.Contains(strings.ToLower(model), "gpt-") {
+		return
+	}
+	var v int64
+	switch n := obj["max_tokens"].(type) {
+	case float64:
+		v = int64(n)
+	case int64:
+		v = n
+	case int:
+		v = int64(n)
+	default:
+		return
+	}
+	if v < gptMinMaxTokens {
+		obj["max_tokens"] = int64(gptMinMaxTokens)
+		log.Printf("max_tokens clamped model=%s %d -> %d", model, v, gptMinMaxTokens)
 	}
 }
 
