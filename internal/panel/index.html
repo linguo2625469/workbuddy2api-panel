@@ -1140,6 +1140,31 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </header>
         <pre id="logBox"></pre>
       </div>
+
+      <div class="box">
+        <header>
+          <h3>积分历史 <span class="hint">每次真实查到余额与上次比对，变动即留痕</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="creditNote">—</span>
+        </header>
+        <div class="fbar">
+          <select id="creditLimit" aria-label="读取条数">
+            <option value="100" selected>最近 100 条</option>
+            <option value="300">最近 300 条</option>
+            <option value="1000">最近 1000 条</option>
+          </select>
+          <span class="grow"></span>
+          <button class="xs" id="btnCreditReload">重新读取</button>
+        </div>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th>时间</th><th>账号</th><th class="num">变动</th><th class="num">变动后余额</th><th>说明</th>
+            </tr></thead>
+            <tbody id="creditBody"></tbody>
+          </table>
+        </div>
+      </div>
     </section>
   </div>
 </div>

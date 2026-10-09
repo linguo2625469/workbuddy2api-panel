@@ -681,7 +681,17 @@ type Client struct {
 	// false 时即便用户 auth 写了 realm=global 也**不**路由到 global base——
 	// chatBase/billingBase 返回 CN base，路径也走 CN（双保险，与 auth.Realm() 的开关闸呼应）。
 	GlobalEnabled bool
+
+	// creditObserver 余额查询观察者（见 CreditObserver / SetCreditObserver）。
+	// atomic：启动期挂载、运行期并发读，不参与任何出站决策。
+	creditObserver atomic.Pointer[CreditObserver]
 }
+
+// CreditObserver 余额查询观察者：每次**真实查到**余额后回调（uid + 余额绝对值）。
+// 旁路通知，不改变任何透传字节；未挂载时零开销。用于积分历史留痕
+// （internal/credithist）：余额查询是"积分变动"唯一可靠的观测口——签到 / 活跃
+// 上报等渠道上游不落金额日志，只能靠比对余额覆盖。
+type CreditObserver func(uid string, credits int64)
 
 // New 生产默认值。Transport 由 newTransport() 集中构造（连接层加固：真正禁 h2 /
 // TLS 握手超时 / 短 keepalive 探测 / 失败清池，参数见 transport.go——吸收上游
@@ -2052,7 +2062,9 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 	// 企业版额度不在「个人资源包」体系内：get-user-resource* 对 enterpriseId 非空账号
 	// 恒返回空 Accounts（实测 code 0 且 Accounts null），故分流到企业口径端点。
 	if a.IsEnterprise() {
-		return c.enterpriseResource(a, soon)
+		remain, total, expiring, earliestAt, earliestRemaining, err = c.enterpriseResource(a, soon)
+		c.notifyCredits(a, remain, err)
+		return
 	}
 	now := time.Now()
 	body := map[string]any{
@@ -2128,7 +2140,41 @@ func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration
 			expiring += r
 		}
 	}
+	c.notifyCredits(a, remain, nil)
 	return remain, total, expiring, earliestAt, earliestRemaining, nil
+}
+
+// SetCreditObserver 挂载/注销（nil）余额观察者。可在启动后任意时刻调用；
+// 观察者必须自身并发安全且快速返回——它在余额查询的调用栈上同步执行。
+func (c *Client) SetCreditObserver(fn CreditObserver) {
+	if c == nil {
+		return
+	}
+	if fn == nil {
+		c.creditObserver.Store(nil)
+		return
+	}
+	c.creditObserver.Store(&fn)
+}
+
+// notifyCredits 查询成功（err == nil）后旁路通知观察者。失败不是观测值：
+// 网络抖动返回的 0 余额若被留痕，会在下一次成功时造出一条假变动。
+func (c *Client) notifyCredits(a *auth.Auth, credits int64, err error) {
+	if c == nil || err != nil || a == nil {
+		return
+	}
+	fn := c.creditObserver.Load()
+	if fn == nil {
+		return
+	}
+	// 观察者是纯旁路：它 panic 绝不能打断余额刷新/签到这条主流程（调度器 goroutine
+	// 里未恢复的 panic 会直接带走整个进程）。与"落盘失败只记日志"同一哲学。
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("WARN: [upstream] 余额观察者 panic 已忽略: %v", r)
+		}
+	}()
+	(*fn)(a.UID, credits)
 }
 
 // respAccount 供 packageRemainUsed 解析的套餐字段（CreditPackages 的逐包结构同构）。
