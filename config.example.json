@@ -3,6 +3,7 @@
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "dns_servers": [],
   "server": {
     "read_timeout": "300s"
   },
