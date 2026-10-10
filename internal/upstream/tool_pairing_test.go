@@ -422,3 +422,94 @@ func TestFoldTextIntoPrevToolCall(t *testing.T) {
 		t.Fatal("数组正文不该被折叠（会丢结构）")
 	}
 }
+
+// TestCleanupOrphanToolCallsEmptyName 空 function.name 的钉桩用例（线上 11133）。
+//
+// 来源：上游流式响应在工具调用 name 分片到达前异常结束（200 空流也算），客户端把
+// name:"" 的条目写进会话历史。下一轮原样转发，WorkBuddy 上游直接判
+//
+// 400 {"code":11133,"extError":{"code":"model_param_invalid",
+//
+//	"message":"the request parameters were rejected by the model provider"}}
+//
+// 且**带不带配对结果都会拒**——带结果的脏条目会命中 keepCalls 原样出站（修复前
+// 的形态）。现在按 id 对称裁剪：调用与其结果成对剔除，assistant 消息本身保留，
+// 配对对称不变式照常成立。
+//
+// 边界与既有「空 id 双侧不识别」用例同理：function 或 name 字段缺失的占位条目
+// 不判脏（toolCallNameEmpty 只认「function 存在且 name 为空白串」），避免扩大打击面。
+func TestCleanupOrphanToolCallsEmptyName(t *testing.T) {
+	t.Run("空name带结果：调用与结果成对剔除，assistant保留", func(t *testing.T) {
+		in := msgs(t, `[
+{"role":"user","content":"q"},
+{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"","arguments":"{}"}}]},
+{"role":"tool","tool_call_id":"c1","content":"r1"},
+{"role":"user","content":"next"}
+]`)
+		out, changed := cleanupOrphanToolCalls(in)
+		if !changed {
+			t.Fatal("changed=false，期望剔除空 name 调用")
+		}
+		assertSummary(t, summarize(out), []string{"user(-)", "assistant(-)", "user(-)"})
+	})
+
+	t.Run("空name且无结果：仍走孤儿路径删除", func(t *testing.T) {
+		// 回归钉桩：若改成「空 name 不登记 callIDs」，hasTraffic 会被判 false 早退，
+		// 该脏条目反而漏出站。必须仍删除。
+		in := msgs(t, `[
+{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"","arguments":"{}"}}]},
+{"role":"user","content":"go"}
+]`)
+		out, changed := cleanupOrphanToolCalls(in)
+		if !changed {
+			t.Fatal("changed=false，期望删除空 name 孤儿调用")
+		}
+		msg := out[0].(map[string]any)
+		if _, has := msg["tool_calls"]; has {
+			t.Error("空 name 孤儿调用的 tool_calls 键应被删除")
+		}
+	})
+
+	t.Run("纯空白name判脏", func(t *testing.T) {
+		in := msgs(t, `[
+{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"   ","arguments":"{}"}}]},
+{"role":"tool","tool_call_id":"c1","content":"r1"}
+]`)
+		out, changed := cleanupOrphanToolCalls(in)
+		if !changed {
+			t.Fatal("changed=false，纯空白 name 应与空串同判")
+		}
+		assertSummary(t, summarize(out), []string{"assistant(-)"})
+	})
+
+	t.Run("批内混合：只剔脏项，健康项不动", func(t *testing.T) {
+		in := msgs(t, `[
+{"role":"assistant","content":null,"tool_calls":[
+{"id":"c1","type":"function","function":{"name":"","arguments":"{}"}},
+{"id":"c2","type":"function","function":{"name":"read","arguments":"{}"}}
+]},
+{"role":"tool","tool_call_id":"c1","content":"r1"},
+{"role":"tool","tool_call_id":"c2","content":"r2"}
+]`)
+		out, changed := cleanupOrphanToolCalls(in)
+		if !changed {
+			t.Fatal("changed=false，期望对称裁剪脏项")
+		}
+		assertSummary(t, summarize(out), []string{"assistant(c2)", "tool(c2)"})
+	})
+
+	t.Run("function或name缺失不判脏（不扩大打击面）", func(t *testing.T) {
+		// 与既有 TestCleanupOrphanToolCalls 各子用例口径一致：无 function 字段的
+		// 占位条目仍按原配对规则处理，空 name 判定不误伤。
+		in := msgs(t, `[
+{"role":"assistant","content":null,"tool_calls":[{"id":"c1"},{"id":"c2"}]},
+{"role":"tool","tool_call_id":"c1","content":"r1"},
+{"role":"tool","tool_call_id":"c2","content":"r2"}
+]`)
+		out, changed := cleanupOrphanToolCalls(in)
+		if changed {
+			t.Error("changed=true，缺 function 字段不应判脏")
+		}
+		assertSummary(t, summarize(out), []string{"assistant(c1,c2)", "tool(c1)", "tool(c2)"})
+	})
+}
