@@ -779,10 +779,11 @@ async function loadLogs() {
   const rq = trangeQuery('reqRange', false);
   rq.set('limit', limit);
   try {
-    const [d, metrics, requestRows] = await Promise.all([
+    const [d, metrics, requestRows, credit] = await Promise.all([
       api('logs'),
       api('request_metrics').catch(() => ({})),
       api('request_logs?' + rq.toString()).catch(() => ({ entries: [] })),
+      api('credit_history?limit=' + creditLimitValue()).catch(() => null),
     ]);
     // 归档开启时以归档为准——「区间内没有记录」是一个真实结果，不能回落成内存里
     // 的最近 100 条（那会把筛选条件之外、时间范围之外的请求显示出来）。
@@ -805,6 +806,7 @@ async function loadLogs() {
     $('logNote').textContent = logCh === 'all'
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
+    renderCreditHistory(credit);
   } catch (e) { /* 概览已提示 */ }
 }
 
@@ -824,6 +826,78 @@ function renderRequestMetrics(m, entries) {
 
   reqEntries = entries || [];
   renderRequestTable();
+}
+
+/* ── 积分历史（每次真实查到余额与上次比对，变动即留痕）─────────────────
+   纯格式化函数集中在此，便于前端测试按切片断言；变动列 +N / −N（U+2212，
+   与请求记录一致），余额用千分位。 */
+function creditNum(n) {
+  return Number(n || 0).toLocaleString('zh-CN');
+}
+function creditDeltaText(delta) {
+  const d = Number(delta || 0);
+  if (d > 0) return '+' + creditNum(d);
+  if (d < 0) return '−' + creditNum(-d);
+  return '0';
+}
+function creditTimeText(e) {
+  if (!e || !e.time) return '—';
+  const d = new Date(e.time);
+  // 正常链路 time 由 Go 的 time.Time 序列化，恒为 RFC3339；这里挡的是手工改文件/
+  // 将来换格式等脏数据——toLocaleTimeString 遇到非法日期不抛异常，只会渲染出
+  // "Invalid Date" 这种没意义的字样。
+  return isNaN(d.getTime()) ? '—' : d.toLocaleTimeString('zh-CN', { hour12: false });
+}
+function creditAccountText(e) {
+  e = e || {};
+  return e.account ? String(e.account) : (e.uid || '—');
+}
+function creditBalanceText(e) {
+  return creditNum(e && e.after);
+}
+function creditDescText(e) {
+  return '余额 ' + creditNum(e && e.before) + ' → ' + creditNum(e && e.after);
+}
+function creditEntryText(e) {
+  return creditTimeText(e) + ' | ' + creditAccountText(e) + ' | ' + creditDeltaText(e && e.delta) +
+    ' | ' + creditBalanceText(e) + ' | ' + creditDescText(e);
+}
+function creditHistoryNote(entries) {
+  entries = entries || [];
+  if (!entries.length) return '暂无积分变动记录';
+  let net = 0;
+  for (const e of entries) net += Number(e && e.delta || 0);
+  return entries.length + ' 条 · 净 ' + (net > 0 ? '+' : net < 0 ? '−' : '') + creditNum(Math.abs(net));
+}
+function renderCreditHistory(d) {
+  const body = $('creditBody'), note = $('creditNote');
+  if (!body) return;
+  if (!d) {
+    if (note) note.textContent = '积分历史不可用';
+    body.innerHTML = '<tr><td colspan="5" style="color:var(--ink-3)">积分历史不可用</td></tr>';
+    return;
+  }
+  const entries = d.entries || [];
+  if (note) note.textContent = creditHistoryNote(entries);
+  body.innerHTML = entries.length
+    ? entries.map(e => '<tr>' +
+      '<td>' + esc(creditTimeText(e)) + '</td>' +
+      '<td>' + esc(creditAccountText(e)) + '</td>' +
+      '<td class="num">' + esc(creditDeltaText(e && e.delta)) + '</td>' +
+      '<td class="num">' + esc(creditBalanceText(e)) + '</td>' +
+      '<td>' + esc(creditDescText(e)) + '</td>' +
+      '</tr>').join('')
+    : '<tr><td colspan="5" style="color:var(--ink-3)">暂无积分变动记录</td></tr>';
+}
+function creditLimitValue() {
+  const el = $('creditLimit');
+  const n = el ? Number(el.value) : 100;
+  return n === 300 || n === 1000 ? n : 100;
+}
+async function loadCreditHistory() {
+  let d = null;
+  try { d = await api('credit_history?limit=' + creditLimitValue()); } catch (e) { d = null; }
+  renderCreditHistory(d);
 }
 
 /* reqMatch 请求记录筛选：q 对 IP/UA/模型/账号/请求 ID 做空格分词的 AND 包含匹配，
@@ -915,6 +989,8 @@ if ($('btnReqReload')) $('btnReqReload').onclick = loadLogs;
 // 时间范围：默认「全部历史」——请求记录页的历史行为就是"取最近 N 条"，
 // 加一个默认收窄的区间会让打开页面时看到的条数凭空变少。
 if ($('reqRange')) trangeBind('reqRange', loadLogs, '0');
+if ($('creditLimit')) $('creditLimit').onchange = loadCreditHistory;
+if ($('btnCreditReload')) $('btnCreditReload').onclick = loadCreditHistory;
 
 function requestLogText(e) {
   const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';

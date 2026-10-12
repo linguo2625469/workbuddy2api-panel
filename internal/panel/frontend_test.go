@@ -271,6 +271,53 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// 积分历史区块：变动列 +N / −N（U+2212）、余额千分位、空列表提示。
+func TestAppJSCreditHistoryFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; credit history formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function creditNum');
+const end = src.indexOf('function renderCreditHistory');
+if (start < 0 || end < 0) throw new Error('credit history helpers not found');
+const ctx = { Date, Number, String, Math, RegExp, isNaN };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(start, end) +
+  '\nthis.creditEntryText=creditEntryText;this.creditHistoryNote=creditHistoryNote;',
+  ctx
+);
+const time = new Date(2026, 8, 28, 14, 5, 6).toISOString();
+process.stdout.write(JSON.stringify({
+  gain: ctx.creditEntryText({ time, uid: '89374120', account: '小明', delta: 100, before: 1300, after: 1400 }),
+  loss: ctx.creditEntryText({ time, uid: '89374120', account: '', delta: -30, before: 1400, after: 1370 }),
+  note: ctx.creditHistoryNote([{ delta: 1300 }, { delta: -60 }]),
+  empty: ctx.creditHistoryNote([]),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "credit-history-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("credit history formatting node test failed: %v\n%s", err, out)
+	}
+	gain := "14:05:06 | 小明 | +100 | 1,400 | 余额 1,300 → 1,400"
+	loss := "14:05:06 | 89374120 | −30 | 1,370 | 余额 1,400 → 1,370"
+	want := `{"gain":` + strconv.Quote(gain) + `,"loss":` + strconv.Quote(loss) +
+		`,"note":"2 条 · 净 +1,240","empty":"暂无积分变动记录"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("credit history formatting=%s want %s", out, want)
+	}
+}
+
 // 请求记录筛选：IP / UA / 模型 / 账号 / 请求 ID 的包含匹配（空格分词 AND）+ 结果精确匹配。
 func TestAppJSRequestMatch(t *testing.T) {
 	node, err := exec.LookPath("node")
