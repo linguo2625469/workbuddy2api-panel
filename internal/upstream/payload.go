@@ -52,6 +52,7 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	normalizeToolPatterns(obj)
 	normalizeRoles(obj)
 	normalizeImageURL(obj)
+	dropReasoningContentParts(obj)
 	// tool 配对三步（见 tool_pairing.go）：先合并再重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
 	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
@@ -289,6 +290,57 @@ func normalizeImageURL(obj map[string]any) {
 			part["image_url"] = map[string]any{"url": imageURL}
 		}
 	}
+}
+
+// dropReasoningContentParts 剔除 chat content 数组里的 reasoning_text / reasoning 片段。
+//
+// Codex 只走 /v1/responses：new-api 的 responses→chat 转换器
+// （openai_responses_to_openai_chat_completions）会把助手历史里的思考片段原样透传进
+// /v1/chat/completions。上游 content 类型白名单不含 reasoning_text，命中即 HTTP 400
+// code=11101 "unsupported content type at index 0: reasoning_text"。
+//
+// 思考片段只是模型私有推理，下游续写不需要，剔除无副作用：
+//   - 删除 type 为 reasoning_text / reasoning 的片段（TrimSpace 后比较）
+//   - 若删除后 content 为空且该消息无 tool_calls，整条消息一并删除
+func dropReasoningContentParts(obj map[string]any) {
+	msgs, ok := obj["messages"].([]any)
+	if !ok {
+		return
+	}
+	out := make([]any, 0, len(msgs))
+	for _, rawMsg := range msgs {
+		msg, ok := rawMsg.(map[string]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		parts, ok := msg["content"].([]any)
+		if !ok {
+			out = append(out, rawMsg)
+			continue
+		}
+		kept := make([]any, 0, len(parts))
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				kept = append(kept, rawPart)
+				continue
+			}
+			ptype, _ := part["type"].(string)
+			if strings.TrimSpace(ptype) == "reasoning_text" || strings.TrimSpace(ptype) == "reasoning" {
+				continue
+			}
+			kept = append(kept, rawPart)
+		}
+		if len(kept) == 0 {
+			if _, hasToolCalls := msg["tool_calls"]; !hasToolCalls {
+				continue
+			}
+		}
+		msg["content"] = kept
+		out = append(out, rawMsg)
+	}
+	obj["messages"] = out
 }
 
 // ensureConsoleSystem global realm 兜底 system 注入（吸收 PR #45，防 console 域上游 code 11-128）：

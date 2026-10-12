@@ -465,3 +465,114 @@ func TestClampGPTMinMaxTokens(t *testing.T) {
 		})
 	}
 }
+
+// TestDropReasoningContentParts 覆盖思考片段剥离规则本身（直调，隔离其它归一化步骤）。
+// 背景：Codex 只走 /v1/responses，new-api 的 responses→chat 转换器会把助手历史里的
+// reasoning_text 原样透传进 /v1/chat/completions；上游 content 类型白名单不含它，
+// 命中即 HTTP 400 code=11101 "unsupported content type at index 0: reasoning_text"。
+func TestDropReasoningContentParts(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string // 期望的 messages JSON（null 表示字段缺失）
+	}{
+		{
+			"reasoning_text 剥离、text 保留",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"think"},{"type":"text","text":"ans"}]}]}`,
+			`[{"role":"assistant","content":[{"type":"text","text":"ans"}]}]`,
+		},
+		{
+			"reasoning 别名同样剥离",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning","text":"think"},{"type":"output_text","text":"ans"}]}]}`,
+			`[{"role":"assistant","content":[{"type":"output_text","text":"ans"}]}]`,
+		},
+		{
+			"type 前后空白同样命中",
+			`{"messages":[{"role":"assistant","content":[{"type":" reasoning_text ","text":"think"},{"type":"text","text":"ans"}]}]}`,
+			`[{"role":"assistant","content":[{"type":"text","text":"ans"}]}]`,
+		},
+		{
+			"剥离后 content 为空且无 tool_calls：整条消息删除",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"think"}]},{"role":"user","content":"hi"}]}`,
+			`[{"role":"user","content":"hi"}]`,
+		},
+		{
+			"剥离后 content 为空但有 tool_calls：消息保留（空数组 content）",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"think"}],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{}"}}]}]}`,
+			`[{"role":"assistant","content":[],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{}"}}]}]`,
+		},
+		{
+			"字符串 content 不受影响",
+			`{"messages":[{"role":"assistant","content":"plain"},{"role":"user","content":"hi"}]}`,
+			`[{"role":"assistant","content":"plain"},{"role":"user","content":"hi"}]`,
+		},
+		{
+			"非对象片段原样保留",
+			`{"messages":[{"role":"assistant","content":["raw",{"type":"text","text":"t"}]}]}`,
+			`[{"role":"assistant","content":["raw",{"type":"text","text":"t"}]}]`,
+		},
+		{
+			"messages 缺失不 panic",
+			`{"model":"deepseek-v4.1-flash"}`,
+			`null`,
+		},
+		{
+			"messages 非数组不 panic",
+			`{"messages":"weird"}`,
+			`"weird"`,
+		},
+		{
+			"全部消息均被剥离：messages 变空数组",
+			`{"messages":[{"role":"assistant","content":[{"type":"reasoning_text","text":"t"}]}]}`,
+			`[]`,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			obj, err := decodeBody([]byte(c.body))
+			if err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			dropReasoningContentParts(obj)
+			var want any
+			if err := json.Unmarshal([]byte(c.want), &want); err != nil {
+				t.Fatalf("unmarshal want: %v", err)
+			}
+			if !reflect.DeepEqual(obj["messages"], want) {
+				t.Fatalf("messages = %#v, want %#v", obj["messages"], want)
+			}
+		})
+	}
+}
+
+// TestPrepareBodyDropsReasoningTextParts 全链路断言：PrepareBodyOptWithEfforts 管线已挂接
+// 剥离步骤，Codex 历史报文里的 reasoning_text 不再出站（sanitize 两态一致）。
+func TestPrepareBodyDropsReasoningTextParts(t *testing.T) {
+	body := `{"model":"deepseek-v4.1-flash","messages":[
+		{"role":"user","content":"hi"},
+		{"role":"assistant","content":[{"type":"reasoning_text","text":"think"},{"type":"text","text":"ans"}]},
+		{"role":"user","content":"again"}
+	]}`
+	for _, sanitize := range []bool{false, true} {
+		out := PrepareBodyOptWithEfforts([]byte(body), sanitize, nil)
+		if strings.Contains(string(out), "reasoning_text") {
+			t.Fatalf("sanitize=%v: reasoning_text 未剥离: %s", sanitize, out)
+		}
+		obj, err := decodeBody(out)
+		if err != nil {
+			t.Fatalf("sanitize=%v unmarshal: %v", sanitize, err)
+		}
+		msgs := obj["messages"].([]any)
+		if len(msgs) != 3 {
+			t.Fatalf("sanitize=%v: messages 数 = %d, want 3", sanitize, len(msgs))
+		}
+		content := msgs[1].(map[string]any)["content"].([]any)
+		if len(content) != 1 {
+			t.Fatalf("sanitize=%v: 助手 content 片段数 = %d, want 1", sanitize, len(content))
+		}
+		if got := content[0].(map[string]any)["text"]; got != "ans" {
+			t.Fatalf("sanitize=%v: 保留片段 text = %v, want ans", sanitize, got)
+		}
+	}
+}
