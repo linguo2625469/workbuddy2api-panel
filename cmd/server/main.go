@@ -165,6 +165,18 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
+	// DNS：Android 没有 /etc/resolv.conf，Go 的纯 Go 解析器会退回 127.0.0.1/::1，
+	// 于是查任何域名都变成"连本机 53 端口"（dial tcp: lookup copilot.tencent.com
+	// on [::1]:53: connection refused）。配了 dns_servers / WB2A_DNS 就显式指定。
+	if len(cfg.DNSServers) > 0 {
+		d := upstream.NewDNSDialer(cfg.DNSServers)
+		up.SetDNSDialer(d)
+		// 推送 webhook / Upstash 镜像等走 http.DefaultTransport，一并换掉
+		if t, ok := http.DefaultTransport.(*http.Transport); ok {
+			t.DialContext = d.DialContext
+		}
+		log.Printf("DNS: 出站解析用 %v（不走系统 /etc/resolv.conf）", cfg.DNSServers)
+	}
 	// model.json 本地缓存接线（context_length/max_output_tokens 四级查找链第 3 级）：
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
