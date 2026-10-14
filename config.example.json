@@ -65,6 +65,14 @@
     "token": ""
   },
   "pool": {
+    "strategy": {
+      "domestic": "weighted_random",
+      "international": "weighted_random"
+    },
+    "account_order": {
+      "domestic": [],
+      "international": []
+    },
     "max_in_flight": 3,
     "max_in_flight_global": 2,
     "breaker_threshold": 3,

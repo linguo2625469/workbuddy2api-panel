@@ -137,6 +137,22 @@ func (r *Router) Resolve(key string) (string, bool) {
 	return r.ResolveForModel(key, "")
 }
 
+// LookupForModel 只复用已有有效绑定，不通过哈希为新会话分配账号。
+// 有序账号池策略用它保留粘性，未绑定会话由 Pool 选号并在成功后 Bind。
+func (r *Router) LookupForModel(key, model string) (string, bool) {
+	now := time.Now()
+	available := r.availableSet(model)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, found := r.entries[key]
+	if !found || expired(e, now, r.cfg.TTL) || !available[e.uid] {
+		return "", false
+	}
+	r.entries[key] = entry{uid: e.uid, lastActive: now}
+	r.cfg.Store.SetBind(key, e.uid, r.cfg.TTL)
+	return e.uid, true
+}
+
 // ResolveForModel 返回会话 key 在该模型上应绑定的账号 uid。
 // 命中且账号在该模型可用 → 滚动 lastActive 并直接返回；否则（绑定号已冷却/占满/
 // 被该模型限流）走重新分配。

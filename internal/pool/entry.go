@@ -495,7 +495,8 @@ type stateModelCost struct {
 
 // stateFile 持久化格式。
 type stateFile struct {
-	Accounts map[string]stateAccount `json:"accounts"`
+	Accounts   map[string]stateAccount   `json:"accounts"`
+	Scheduling map[string]scheduleCursor `json:"scheduling,omitempty"`
 }
 
 // flushInterval 后台落盘周期。

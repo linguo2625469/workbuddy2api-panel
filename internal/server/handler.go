@@ -565,7 +565,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
+		resolve := h.cfg.Session.ResolveForModel
+		if h.cfg.Pool.StrategyForRealm(realm) != pool.WeightedRandom {
+			resolve = h.cfg.Session.LookupForModel
+		}
+		if uid, ok := resolve(sessKey, peek.Model); ok {
 			stickyUID = uid
 		}
 	}

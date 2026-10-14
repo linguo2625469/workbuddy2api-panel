@@ -973,6 +973,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <header><h3>账号池与流量治理</h3></header>
           <div class="pad">
             <div class="grid3">
+              <label class="fld"><span class="lb">国内版调度策略</span>
+                <select name="strategy_domestic">
+                  <option value="weighted_random">加权随机（默认）</option>
+                  <option value="round_robin">轮询</option>
+                  <option value="sequential_exhaust">顺序耗尽</option>
+                </select></label>
+              <label class="fld"><span class="lb">国际版调度策略</span>
+                <select name="strategy_international">
+                  <option value="weighted_random">加权随机（默认）</option>
+                  <option value="round_robin">轮询</option>
+                  <option value="sequential_exhaust">顺序耗尽</option>
+                </select></label>
+            </div>
+            <div class="grid3">
+              <label class="fld"><span class="lb">国内版账号顺序（UID）</span>
+                <input name="domestic_account_order" placeholder="uid1, uid2, uid3"></label>
+              <label class="fld"><span class="lb">国际版账号顺序（UID）</span>
+                <input name="international_account_order" placeholder="uid1, uid2, uid3"></label>
+            </div>
+            <div class="hint">按地区独立热生效；未列出的账号按 UID 排序追加。指针按地区和模型分别保存。会话粘性、模型成本分层优先；有序策略等待冷却恢复，不提前试探。临时重试或在途占满不推进顺序耗尽的主账号。闲置与快过期积分权重仅用于加权随机。</div>
+            <div class="grid3">
               <label class="fld"><span class="lb">单账号最大在途</span>
                 <input name="max_in_flight" type="number" min="0" placeholder="3">
                 <span class="hint">0 = 不限制</span></label>

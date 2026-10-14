@@ -1006,3 +1006,47 @@ process.stdout.write(JSON.stringify({
 			strings.TrimSpace(string(out)), want)
 	}
 }
+
+// 用实际表单函数验证地区策略回填、独立提交以及清空账号顺序。
+func TestRegionSchedulingFormRoundTrip(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available")
+	}
+	script := `const fs=require('fs'), vm=require('vm'), assert=require('assert');
+ const src=fs.readFileSync(process.argv[2],'utf8');
+ const html=fs.readFileSync('index.html','utf8');
+ const elements={};
+ for(const name of ['strategy_domestic','strategy_international','domestic_account_order','international_account_order']) {
+   assert(html.includes('name="'+name+'"'), 'missing form field '+name);
+   elements[name]={type:name.startsWith('strategy_')?'select-one':'text',value:''};
+ }
+ const cfg={pool:{strategy:{domestic:'round_robin',international:'sequential_exhaust'},account_order:{domestic:['c','a'],international:['y','x']}}};
+ const nodes={cfgForm:{elements},cfgPath:{},cfgNote:{}};
+ const ctx={cfgLoaded:null,api:async()=>({config:cfg}),$:id=>nodes[id],markDurationFields(){},toast(message){throw Error(message)}};
+ vm.createContext(ctx);
+ vm.runInContext(src.slice(src.indexOf('const CFG_MAP ='),src.indexOf('/* Go 时长字段即时校验')),ctx);
+ (async()=>{
+   await ctx.loadConfig();
+   assert.equal(elements.strategy_domestic.value,'round_robin');
+   assert.equal(elements.strategy_international.value,'sequential_exhaust');
+   assert.equal(elements.domestic_account_order.value,'c, a');
+   elements.strategy_domestic.value='weighted_random';
+   elements.international_account_order.value='';
+   const result=ctx.collectConfig();
+   assert.equal(result.pool.strategy.domestic,'weighted_random');
+   assert.equal(result.pool.strategy.international,'sequential_exhaust');
+   assert.equal(JSON.stringify(result.pool.account_order.domestic),'["c","a"]');
+   assert.equal(JSON.stringify(result.pool.account_order.international),'[]');
+   delete cfg.pool.strategy; await ctx.loadConfig();
+   assert.equal(elements.strategy_domestic.value,'weighted_random');
+   assert.equal(elements.strategy_international.value,'weighted_random');
+ })().catch(e=>{console.error(e);process.exitCode=1});`
+	fp := filepath.Join(t.TempDir(), "region-form.cjs")
+	if err = os.WriteFile(fp, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, fp, "app.js").CombinedOutput(); err != nil {
+		t.Fatalf("form round trip: %v\n%s", err, out)
+	}
+}

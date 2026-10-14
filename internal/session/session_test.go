@@ -377,3 +377,30 @@ func TestExtractKeyMultimodalContent(t *testing.T) {
 		t.Error("pure-image url changes must keep same derived key")
 	}
 }
+
+func TestLookupForModelOnlyReusesValidBinding(t *testing.T) {
+	available := []string{"a", "b"}
+	store := newCountingStore()
+	r := New(Config{TTL: time.Minute, Store: store, AvailableForModel: func(model string) []string { return available }})
+	if _, ok := r.LookupForModel("new", "m"); ok || r.Count() != 0 {
+		t.Fatal("lookup allocated a new binding")
+	}
+	r.Bind("key", "a")
+	if uid, ok := r.LookupForModel("key", "m"); !ok || uid != "a" {
+		t.Fatalf("valid lookup=%s %v", uid, ok)
+	}
+	available = []string{"b"}
+	if _, ok := r.LookupForModel("key", "m"); ok {
+		t.Fatal("unavailable binding reused")
+	}
+	available = []string{"a", "b"}
+	r.mu.Lock()
+	r.entries["key"] = entry{uid: "a", lastActive: time.Now().Add(-2 * time.Minute)}
+	r.mu.Unlock()
+	if _, ok := r.LookupForModel("key", "m"); ok {
+		t.Fatal("expired binding reused")
+	}
+	if r.Count() != 1 {
+		t.Fatal("lookup allocated a replacement")
+	}
+}
