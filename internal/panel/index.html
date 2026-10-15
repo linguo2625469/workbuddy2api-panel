@@ -586,6 +586,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
   .exp-main.err { color: var(--bad); }
 
+  /* ── 账号备注（本机 localStorage，不写服务器）─────────────────────────
+     有备注时备注当主标识，原昵称 / uid8 以 .rm-ghost 浅色跟随。账号池、用量明细、
+     积分扣除三张表共用同一套渲染，保证同一账号在两个视图里显示一致。 */
+  .rm-ghost { color: var(--ink-3); font-weight: 400; margin-left: .35em; }
+  .rm-list { display: flex; flex-direction: column; gap: 9px; }
+  .rm-row { display: flex; align-items: center; gap: 10px; }
+  .rm-row .rm-who { flex: 0 0 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--ink-2); font-size: 12.5px; }
+  .rm-row input { flex: 1; }
+
 </style>
 </head>
 <body>
@@ -657,9 +667,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>积分到期提醒<span class="hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
           <span class="grow"></span>
           <span class="note" id="expNote"></span>
+          <button class="xs" id="btnExpFold" aria-expanded="true">收起</button>
           <button class="xs" id="btnExp">检查</button>
         </header>
-        <div class="pad"><div id="expList"></div></div>
+        <div class="pad" id="expPad"><div id="expList"></div></div>
       </div>
 
       <div class="box">
@@ -667,6 +678,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
+          <button class="xs" id="btnRemarks">备注</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
@@ -1252,6 +1264,25 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="grow"></span>
       <button class="primary" id="btnKey">进入</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 账号备注：只写本机 localStorage，不写回服务器；账号池与用量两个视图同步显示 -->
+<div class="veil" id="remarkVeil">
+  <div class="dlg" style="width:560px">
+    <header>
+      <h3>账号备注</h3>
+      <div class="hint">备注只存在本机浏览器（localStorage: wb2api.remarks.v1），不写回后端；账号池与用量页会同时显示「备注 + 原昵称」。留空即清除该账号备注。</div>
+    </header>
+    <div class="body">
+      <div class="rm-list" id="remarkBody"></div>
+    </div>
+    <footer>
+      <button class="danger" id="btnRemarkClear">清空全部</button>
+      <span class="grow"></span>
+      <button id="btnRemarkClose">关闭</button>
+      <button class="primary" id="btnRemarkSave">保存</button>
     </footer>
   </div>
 </div>
