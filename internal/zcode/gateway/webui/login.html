@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zcode2Api · Login</title>
+<link rel="stylesheet" href="app.css?v=1.0.6">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="login-brand">
+      <span class="brand-word" style="font-size:17px">Zcode<b>2</b>Api</span>
+    </div>
+    <div class="login-title">Admin Panel</div>
+    <div class="login-sub">Enter the admin password to continue</div>
+    <div class="login-form">
+      <input type="password" placeholder="Admin password" class="input" id="pw">
+      <button onclick="doLogin()">Continue</button>
+      <div class="login-err" id="err"></div>
+    </div>
+  </div>
+<script>
+var DASH_TOKEN = localStorage.getItem('dash_token') || '';
+async function verify(t) {
+  const res = await fetch('api/status', { headers: { 'Authorization': 'Bearer ' + t } });
+  return res.status === 200;
+}
+async function doLogin() {
+  const t = document.getElementById('pw').value.trim();
+  if (!t) return;
+  document.getElementById('err').textContent = '';
+  if (await verify(t)) {
+    localStorage.setItem('dash_token', t);
+    location.href = './';
+  } else {
+    document.getElementById('err').textContent = 'Invalid password';
+  }
+}
+document.getElementById('pw').addEventListener('keypress', e => { if (e.key === 'Enter') doLogin(); });
+// already logged in → straight in
+(async () => { if (DASH_TOKEN && await verify(DASH_TOKEN)) location.href = './'; })();
+</script>
+</body>
+</html>

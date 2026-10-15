@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zcode2Api · Settings</title>
+<link rel="stylesheet" href="app.css?v=1.0.6">
+</head>
+<body>
+<div id="app" style="display:none">
+<header class="admin-header"><div class="admin-header-inner">
+    <div class="admin-brand"><span class="brand-word">Zcode<b>2</b>Api</span></div>
+    <nav class="admin-nav">
+      <a class="admin-nav-link " href="./">Account Pool</a>
+      <a class="admin-nav-link " href="proxies.html">Proxies</a>
+      <a class="admin-nav-link active" href="settings.html">Settings</a>
+    </nav>
+    <div class="admin-header-right">
+      <a class="admin-header-icon-btn" href="https://github.com/D3-vin/Zcode2Api" target="_blank" title="GitHub"><svg viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg></a>
+      <a class="admin-header-icon-btn" href="https://t.me/D3_vin" target="_blank" title="Telegram"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></a>
+      <span class="admin-header-version" id="hdr-version">v1.0.0</span>
+      <button class="admin-header-icon-btn" title="Log out" onclick="doLogout()"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button>
+    </div>
+  </div></header>
+<main class="admin-main">
+  <div class="page-hd">
+    <div>
+      <div class="page-title">Settings</div>
+      <div class="page-sub">Runtime configuration — applied without a restart</div>
+    </div>
+  </div>
+
+  <div class="settings-stack">
+    <div class="settings-card">
+      <div class="settings-title">Authentication</div>
+      <div class="settings-row"><label>Admin password</label>
+        <input class="input" type="password" id="set-password" placeholder="leave empty to keep unchanged">
+        <div class="hint">Used to log in to this admin panel. Applied immediately.</div></div>
+      <div class="settings-row"><label>Gateway API key (optional)</label>
+        <input class="input" type="password" id="set-gateway" placeholder="leave empty to use the admin password">
+        <div class="hint">When set, calls to /v1/messages must carry Authorization: Bearer &lt;key&gt; or x-api-key. Currently: <span id="gw-state">—</span></div></div>
+      <button class="save-btn" onclick="saveAuth()">Save</button>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">Model &amp; quotas</div>
+      <div class="settings-row"><label>Quota refresh interval (minutes)</label>
+        <input class="input" type="number" id="set-quota" min="0" step="1">
+        <div class="hint">0 disables the periodic monitor (button-only mode).</div></div>
+      <button class="save-btn" onclick="saveModelQuota()">Save</button>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">Captcha pre-mint pool</div>
+      <div class="settings-row"><label>Pool min / max</label>
+        <div style="display:flex;gap:10px"><input class="input" type="number" id="set-pmin" min="1"><input class="input" type="number" id="set-pmax" min="1"></div>
+        <div class="hint">Background solver keeps MIN ready tokens (≤ MAX, serial minting). Applies after restart.</div></div>
+      <div class="settings-row"><label>Token TTL</label>
+        <input class="input" id="set-pttl" placeholder="95s">
+        <div class="hint">Upstream params live ~2 minutes; expired tokens are evicted.</div></div>
+      <button class="save-btn" onclick="saveCaptcha()">Save</button>
+    </div>
+
+    <div class="settings-card">
+      <div class="settings-title">Usage notes</div>
+      <div class="hint" style="margin-top:8px;line-height:2">
+        • Anthropic: <code id="ep1" style="font-family:var(--mono);background:var(--panel-2);padding:1px 6px;border-radius:4px;color:var(--mint)"></code><br>
+        • OpenAI: <code id="ep2" style="font-family:var(--mono);background:var(--panel-2);padding:1px 6px;border-radius:4px;color:var(--mint)"></code><br>
+        • Async (ticket-SSE): <code id="ep3" style="font-family:var(--mono);background:var(--panel-2);padding:1px 6px;border-radius:4px;color:var(--mint)"></code><br>
+        • Both chat endpoints accept Bearer auth with the admin password.
+      </div>
+    </div>
+  </div>
+</main>
+</div>
+<div class="toast-container" id="toasts"></div>
+<script src="app.js?v=1.0.6"></script>
+<script>
+const PAGE = 'settings';
+function boot() {
+  j('api/settings').then(d => {
+    document.getElementById('set-quota').value = d.quota_refresh_min || 0;
+    document.getElementById('set-pmin').value = d.captcha_pool_min || 3;
+    document.getElementById('set-pmax').value = d.captcha_pool_max || 10;
+    document.getElementById('set-pttl').value = d.captcha_pool_ttl || '95s';
+    j('api/status').then(s => {
+      const sel =       sel.innerHTML = (s.models || [{ id: d.default_model || 'GLM-5.3' }]).map(m => `<option ${m.id === d.default_model ? 'selected' : ''}>${m.id}</option>`).join('');
+      const v = document.getElementById('hdr-version'); if (v) v.textContent = 'v' + (s.version || '1.0.0');
+    });
+  });
+  document.getElementById('ep1').textContent = location.origin + '/v1/messages';
+  document.getElementById('ep2').textContent = location.origin + '/v1/chat/completions';
+  document.getElementById('ep3').textContent = location.origin + '/async/v1/messages';
+}
+function saveAuth() {
+  const p = document.getElementById('set-password').value.trim();
+  const g = document.getElementById('set-gateway').value.trim();
+  if (!p && !g) { toast('Enter something to save', 'err'); return; }
+  const body = {};
+  if (p) body.admin_password = p;
+  if (g) body.gateway_key = g;
+  post('api/settings', body).then(() => {
+    if (p) { DASH_TOKEN = p; localStorage.setItem('dash_token', p); document.getElementById('set-password').value = ''; }
+    if (g) document.getElementById('set-gateway').value = '';
+    toast('Authentication saved', 'ok'); boot();
+  }).catch(e => toast('Save failed: ' + (e && e.message ? e.message : e), 'err'));
+}
+function saveModelQuota() {
+  post('api/settings', { quota_refresh_min: parseInt(document.getElementById('set-quota').value || '0', 10) })
+    .then(() => toast('Saved', 'ok')).catch(e => toast('Save failed: ' + (e && e.message ? e.message : e), 'err'));
+}
+function saveCaptcha() {
+  post('api/settings', {
+    captcha_pool_min: parseInt(document.getElementById('set-pmin').value || '3', 10),
+    captcha_pool_max: parseInt(document.getElementById('set-pmax').value || '10', 10),
+    captcha_pool_ttl: document.getElementById('set-pttl').value.trim() || '95s',
+  }).then(() => toast('Saved — pool knobs apply after restart', 'ok'));
+}
+gate(boot);
+</script>
+</body>
+</html>

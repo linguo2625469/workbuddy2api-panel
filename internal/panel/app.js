@@ -338,7 +338,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: 'WorkBuddy 账号', trae: 'Trae 账号', zcode: 'ZCode 账号', autoclaw: 'AutoClaw 账号', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -353,6 +353,9 @@ function go(v) {
   // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
   // 完整逐包明细由卡片上的「检查」按钮显式触发（loadPackages/loadExpiry）。
   if (v === 'taskscenter') reattachQueueView();
+  if (v === 'trae') loadTrae();
+  if (v === 'zcode') loadZcode();
+  if (v === 'autoclaw') loadAutoclaw();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
 /* 首次进入延到本轮脚本求值之后再 go()。
@@ -503,7 +506,7 @@ async function loadOverview(quiet) {
   const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
   $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
     $('sSticky').textContent = d.sticky_sessions;
-    $('navSub').textContent = 'v' + d.version;
+    $('navSub').textContent = 'v' + d.version + ' · Auto Points Farming';
     $('navVer').textContent = 'v' + d.version;
     $('navRedis').textContent = d.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
@@ -629,7 +632,42 @@ async function loadModels() {
   try {
     // 探测数据是可选增强：拉取失败不影响模型列表本身
     const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
-    mdAll = d.models || [];
+    // 追加 Trae CN 模型：统一网关 /v1/models 里 owned_by=trae-solo 的条目，
+    // 补上目录字段让表格正常渲染（无价格/档位数据，排到末尾）。
+    let traeModels = [];
+    try {
+      const vh = {}; const vk = localStorage.getItem(LS_KEY);
+      if (vk) vh['Authorization'] = 'Bearer ' + vk;
+      const vr = await fetch('/v1/models', { headers: vh });
+      const v1 = await vr.json();
+      // 同名统一：与 cn: 目录规范化同名的 trae/zcode 模型不单独成行，给 cn: 行打「多池」标记
+      const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const cnBare = {};
+      (d.models || []).forEach(m => {
+        if (String(m.id || '').startsWith('cn:')) cnBare[norm(m.id.slice(3))] = m;
+      });
+      ((v1 && v1.data) || []).filter(m => {
+        const pools = String(m.owned_by || '').split('+');
+        return pools.includes('trae-solo') || pools.includes('zcode-glm') || pools.includes('autoclaw-glm');
+      }).forEach(m => {
+        const twin = cnBare[norm(m.id)];
+        if (twin) { twin.dual_pool = String(m.owned_by || ''); return; }
+        const pools = String(m.owned_by || '');
+        const isZ = pools.includes('zcode-glm');
+        const isAC = pools.includes('autoclaw-glm');
+        traeModels.push({
+          id: m.id,
+          name: isAC ? 'AutoClaw 上游' : (isZ ? 'ZCode 上游' : 'Trae CN 上游'),
+          vendor: isAC ? 'AutoClaw' : (isZ ? 'ZCode (Z.ai)' : 'Trae CN'),
+          description: (isAC ? 'AutoClaw 云端沙箱模型' : (isZ ? 'ZCode 上游模型' : 'Trae CN 上游模型')) + '（账号池轮转，经统一 /v1 接口调用）',
+          tags: [isAC ? 'autoclaw' : (isZ ? 'zcode' : 'trae')],
+          trae: !isZ && !isAC,
+          zcode: isZ,
+          autoclaw: isAC,
+        });
+      });
+    } catch (_) { /* trae 未启用时静默跳过 */ }
+    mdAll = (d.models || []).concat(traeModels);
     mdProbes = pr.probes || {};
     if (!mdAll.length) {
       tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>';
@@ -678,6 +716,8 @@ function mdMatch(m, f) {
       if (!text.includes(kw)) return false;
     }
   }
+  if (f.realm === 'trae') return !!m.trae;
+  if (f.realm === 'zcode') return !!m.zcode;
   if (f.realm && !String(m.id || '').startsWith(f.realm + ':')) return false;
   if (f.cap === 'tool' && !m.supports_tool_call) return false;
   if (f.cap === 'vision' && !m.supports_images) return false;
@@ -711,10 +751,14 @@ function mdSortList(list, f) {
 function mdRowHtml(m, pr) {
   const eff = (m.supported_efforts || []).slice();
   if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
-  const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
-    : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
+  // trae/zcode 专属条目：上游无档位数据，「—」比误标「不支持思考」诚实
+  const effs = (m.trae || m.zcode)
+    ? '<span style="color:var(--ink-3);font-size:12.5px">—</span>'
+    : (eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
+    : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>');
   // 能力徽标：默认模型 / 工具调用 / 视觉 / 纯推理（上游目录全字段透出，缺失不显示）
   const caps = [];
+  if (m.dual_pool) { const n = String(m.dual_pool).split('+').filter(Boolean).length || 2; caps.push('<span class="tag ok">' + (n > 2 ? n + ' 池兜底' : '双池') + '</span>'); }
   if (m.is_default) caps.push('<span class="tag ok">默认</span>');
   if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
   if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
@@ -1120,11 +1164,34 @@ function openAdd() {
   $('btnCopyUrl').hidden = true; $('btnOpenUrl').hidden = true;
   $('btnStartLogin').hidden = false; $('btnStartLogin').disabled = false;
   stopPoll();
+  // Trae 登录态复位
+  traePendingID = null; stopTraePoll();
+  $('btnStartTrae').hidden = false; $('btnStartTrae').disabled = false;
+  $('traeLoad').hidden = true; $('traeReady').hidden = true;
+  $('traeDone').hidden = true; $('traeErr').hidden = true;
+  // ZCode 登录态复位
+  zcodeFlowID = null; stopZcodePoll();
+  $('btnStartZcode').hidden = false; $('btnStartZcode').disabled = false;
+  $('zcodeLoad').hidden = true; $('zcodeReady').hidden = true;
+  $('zcodeDone').hidden = true; $('zcodeErr').hidden = true;
 }
 function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabLogin').hidden = tab !== 'login';
+  $('addTabTrae').hidden = tab !== 'trae';
+  $('addTabZcode').hidden = tab !== 'zcode';
+  $('addTabAutoclaw').hidden = tab !== 'autoclaw';
   $('addTabImport').hidden = tab !== 'import';
+  // 「获取授权链接」及配套按钮仅 WorkBuddy 登录 tab 需要；其它 tab 全部隐藏。
+  // login tab 下 btnCopyUrl/btnOpenUrl 仍由登录流程自身控制显隐，这里不动。
+  if (tab === 'login') {
+    if ($('btnStartLogin')) $('btnStartLogin').hidden = false;
+  } else {
+    ['btnStartLogin', 'btnCopyUrl', 'btnOpenUrl'].forEach(id => { if ($(id)) $(id).hidden = true; });
+    if ($('addLoad')) $('addLoad').hidden = true;
+  }
+  if (tab !== 'trae') stopTraePoll();
+  if (tab !== 'zcode') stopZcodePoll();
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
@@ -1167,36 +1234,600 @@ async function pollLogin() {
     $('addErr').textContent = e.message + '（关闭后重新添加）';
   }
 }
-function closeAdd() { stopPoll(); loginState = null; $('addVeil').classList.remove('on'); }
+function closeAdd() {
+  stopPoll();
+  // Trae 登录进行中：通知后端取消 pending（fire-and-forget）
+  if (traePendingID) {
+    const pid = traePendingID;
+    traePendingID = null; stopTraePoll();
+    traeAPI('login/cancel?pending_id=' + encodeURIComponent(pid), { method: 'POST', body: '{}' }).catch(() => {});
+  }
+  $('addVeil').classList.remove('on');
+}
 $('btnCloseAdd').onclick = closeAdd;
 $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
+const IMP_HINTS = {
+  workbuddy: '选择 cockpit tools 导出的 JSON 文件，批量导入 WorkBuddy 账号。文件需为账号数组格式。',
+  trae: '选择 Trae CN 账号凭证 JSON（支持 {account,auth} 嵌套格式或 {accessToken,uid} 扁平格式），可导入之前备份的 trae-auths 文件。',
+  zcode: '选择 ZCode 账号 JSON（数组，每项含 jwt 字段，可选 label/device_mid 等）。AutoClaw 暂不支持 JSON 导入，请用登录方式添加。',
+};
+document.querySelectorAll('input[name="impPool"]').forEach(r => {
+  r.onchange = () => { $('impHint').textContent = IMP_HINTS[r.value] || ''; };
+});
+/* 模板下载：按当前选中池生成示例 JSON（前端 Blob 生成，无需后端） */
+const IMP_TEMPLATES = {
+  workbuddy: [{
+    id: 'example-uid-001',
+    email: 'example@mail.com',
+    uid: '1000001',
+    nickname: '示例账号',
+    access_token: 'eyJhbGciOi...(粘贴 access_token)',
+    refresh_token: '粘贴 refresh_token',
+    token_type: 'Bearer',
+    expires_at: 1790000000,
+    domain: 'workbuddy.cn',
+    status: 'active',
+  }],
+  trae: {
+    account: { enterpriseId: 'xxxxxxxxxxxx', nickname: '示例账号', uid: '4368794484227563' },
+    auth: {
+      accessToken: 'eyJhbGciOi...(粘贴 access_token)',
+      refreshToken: '粘贴 refresh_token',
+      apiHost: 'https://api.trae.cn',
+      domain: 'trae.cn',
+      deviceId: '0123456789abcdef0123456789abcdef',
+      machineId: '0123456789abcdef0123456789abcdef',
+      expiresAt: '1790000000',
+    },
+  },
+  zcode: [{
+    jwt: 'eyJhbGciOi...(粘贴 JWT)',
+    label: '示例账号',
+    device_mid: '0123456789abcdef0123456789abcdef',
+    plan_name: 'GLM Coding Start',
+    expires_at: '2026-10-05T00:00:00Z',
+  }],
+};
+if ($('btnImpTemplate')) $('btnImpTemplate').onclick = () => {
+  const pool = (document.querySelector('input[name="impPool"]:checked') || {}).value || 'workbuddy';
+  const blob = new Blob([JSON.stringify(IMP_TEMPLATES[pool] || IMP_TEMPLATES.workbuddy, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'import-template-' + pool + '.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('模板已下载，替换占位值后导入', 'ok');
+};
 $('importFile').onchange = async () => {
   const file = $('importFile').files[0];
   if (!file) return;
   $('importDone').hidden = true; $('importErr').hidden = true;
-  const fd = new FormData();
-  fd.append('file', file);
+  const pool = (document.querySelector('input[name="impPool"]:checked') || {}).value || 'workbuddy';
   const h = {};
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
   try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      console.warn('import errors:', d.errors);
+    let okMsg = '';
+    if (pool === 'workbuddy') {
+      const fd = new FormData();
+      fd.append('file', file);
+      const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      okMsg = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
+    } else if (pool === 'trae') {
+      const text = await file.text();
+      const r = await fetch('/trae/admin/api/accounts/import', {
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, h),
+        body: JSON.stringify({ json: text }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || d.message || ('HTTP ' + r.status));
+      okMsg = '导入完成：' + (d.uid ? '账号 ' + (d.nickname || d.uid) : JSON.stringify(d)) + (d.needs_check ? '（建议确认额度）' : '');
+      if (view === 'trae') loadTrae();
+    } else if (pool === 'zcode') {
+      let data = JSON.parse(await file.text());
+      if (!Array.isArray(data)) data = data.accounts || [];
+      if (!Array.isArray(data) || !data.length) throw new Error('文件需为账号数组（每项含 jwt 字段）');
+      const r = await fetch('/zcode/api/accounts/restore', {
+        method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, h),
+        body: JSON.stringify({ accounts: data }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      okMsg = '导入完成：新增 ' + (d.added ?? '?') + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个（JWT 已存在）' : '');
+      if (view === 'zcode') loadZcode();
     }
+    $('importDone').hidden = false;
+    $('importDone').textContent = okMsg;
     loadOverview(true);
   } catch (e) {
     $('importErr').hidden = false;
     $('importErr').textContent = '导入失败：' + e.message;
   }
   $('importFile').value = '';
+};
+
+/* ── Trae CN（合并网关：/trae/admin/api/*）───────────────────────── */
+async function traeAPI(path, opts = {}) {
+  const h = Object.assign({}, opts.headers || {});
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  if (opts.body) h['Content-Type'] = 'application/json';
+  const r = await fetch('/trae/admin/api/' + path, Object.assign({}, opts, { headers: h }));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || d.message || ('HTTP ' + r.status));
+  return d;
+}
+
+/* Trae 网页登录：POST login → 拿 login_url + pending_id → 浏览器登录 →
+   轮询 login/result（state: pending / success / failed / canceled）。 */
+let traeLoginTimer = null, traePendingID = null;
+function startTraeLogin() {
+  $('btnStartTrae').disabled = true;
+  $('traeLoad').hidden = false; $('traeErr').hidden = true; $('traeDone').hidden = true;
+  traeAPI('login', { method: 'POST', body: '{}' }).then(r => {
+    traePendingID = r.pending_id;
+    $('traeUrl').textContent = r.login_url;
+    $('btnStartTrae').hidden = true;
+    $('traeLoad').hidden = true; $('traeReady').hidden = false;
+    traeLoginTimer = setInterval(pollTraeLogin, 3000);
+  }).catch(e => {
+    $('traeLoad').hidden = true;
+    $('btnStartTrae').disabled = false;
+    $('traeErr').hidden = false;
+    $('traeErr').textContent = e.message;
+  });
+}
+function stopTraePoll() { if (traeLoginTimer) { clearInterval(traeLoginTimer); traeLoginTimer = null; } }
+async function pollTraeLogin() {
+  if (!traePendingID) return;
+  try {
+    const r = await traeAPI('login/result?pending_id=' + encodeURIComponent(traePendingID));
+    if (r.state === 'success') {
+      stopTraePoll(); traePendingID = null;
+      $('traeReady').hidden = true;
+      $('traeDone').hidden = false;
+      $('traeDone').textContent = '已添加 Trae 账号 ' + (r.nickname || r.uid) + '，已载入 Trae 账号池';
+      setTimeout(() => { closeAdd(); loadOverview(true); if (view === 'trae') loadTrae(); }, 1600);
+    } else if (r.state === 'failed') {
+      stopTraePoll(); traePendingID = null;
+      $('traeReady').hidden = true;
+      $('traeErr').hidden = false;
+      $('traeErr').textContent = (r.error || '登录失败') + '（关闭后重新添加）';
+    }
+  } catch (e) {
+    stopTraePoll(); traePendingID = null;
+    $('traeReady').hidden = true;
+    $('traeErr').hidden = false;
+    $('traeErr').textContent = e.message + '（关闭后重新添加）';
+  }
+}
+$('btnStartTrae').onclick = startTraeLogin;
+
+/* Trae 账号列表与操作 */
+function traeStatus(a) {
+  if (a.disabled) return { t: '已禁用', c: 'bad', row: 'off' };
+  if (!a.enabled) return { t: '已停用', c: 'warn', row: 'off' };
+  if (a.cooling) return { t: '冷却中', c: 'warn', row: 'cool' };
+  return { t: '可用', c: 'ok', row: '' };
+}
+function traeExp(a) {
+  if (!a.expires_at) return '—';
+  const ms = a.expires_at < 1e12 ? a.expires_at * 1000 : a.expires_at;
+  const d = new Date(ms);
+  if (isNaN(d)) return '—';
+  const left = (ms - Date.now()) / 86400000;
+  const txt = d.toLocaleDateString() + ' ' + d.toLocaleTimeString().slice(0, 5);
+  return left < 2 ? '<span class="tag warn">' + txt + '</span>' : txt;
+}
+async function loadTrae() {
+  const tb = $('traeBody');
+  try {
+    // accounts 读本地池状态（credits 仅签到/解冻时更新，新导入账号为 0）；
+    // credits 实时查上游积分，合并覆盖展示。
+    const [d, c] = await Promise.all([
+      traeAPI('accounts'),
+      traeAPI('credits').catch(() => null),
+    ]);
+    const rem = {};
+    if (c && c.accounts) c.accounts.forEach(a => { rem[a.uid] = a.remain; });
+    renderTrae(d.accounts || [], rem);
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty"><div class="big">读取失败</div>' + esc(e.message) + '（Trae 未启用或密钥不符，见 config trae 段）</div></td></tr>';
+    return;
+  }
+  loadTraeSched();
+}
+async function loadTraeSched() {
+  const pad = h => String(h).padStart(2, '0') + ':00';
+  try {
+    const s = await traeAPI('schedule');
+    $('traeSchedNote').textContent = '每日 ' + pad(s.checkin_hour) + ' 签到 · ' +
+      (s.refresh_hours || []).map(pad).join(' / ') + ' 刷新 Token';
+    const fmt = t => { if (!t) return '—'; const d = new Date(t); return isNaN(d) ? '—' : d.toLocaleString('zh-CN', { hour12: false }); };
+    $('traeSchedInfo').textContent = '下次执行 ' + fmt(s.next_fire) + '　·　上次签到 ' + fmt(s.last_checkin) + '　·　上次 Token 刷新 ' + fmt(s.last_refresh);
+  } catch (e) {
+    $('traeSchedInfo').textContent = '排程状态获取失败：' + e.message;
+  }
+}
+async function traeScheduleRun(kind, btn, label) {
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '执行中…';
+  try {
+    await traeAPI('schedule/' + kind, { method: 'POST', body: '{}' });
+    toast(label + '已触发，稍后自动刷新状态', 'ok');
+    setTimeout(loadTraeSched, 4000);
+  } catch (e) {
+    toast(label + '触发失败：' + e.message, 'err');
+  } finally { btn.disabled = false; btn.textContent = old; }
+}
+function renderTrae(list, rem) {
+  rem = rem || {};
+  const creditOf = a => (rem[a.uid] != null ? rem[a.uid] : (a.credits || 0));
+  const tb = $('traeBody');
+  const usable = list.filter(a => a.enabled && !a.disabled && !a.cooling).length;
+  const cooling = list.filter(a => a.cooling).length;
+  const off = list.filter(a => a.disabled || !a.enabled).length;
+  const credits = list.reduce((s, a) => s + creditOf(a), 0);
+  $('tTotal').textContent = list.length;
+  $('tHealthy').textContent = usable;
+  $('tCooling').textContent = cooling;
+  $('tDisabled').textContent = off;
+  $('tCredits').textContent = list.length ? credits.toLocaleString() : '-';
+  $('traeNote').textContent = list.length ? '' : '';
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty"><div class="big">Trae 账号池是空的</div>点击右上角「添加账号」→「Trae CN 登录」标签页登录一个 trae.cn 账号</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(a => {
+    const st = traeStatus(a);
+    const short = a.uid.length > 16 ? a.uid.slice(0, 16) + '…' : a.uid;
+    const note = a.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(a.reason) + '</div>' : '';
+    return '<tr class="' + st.row + '" title="uid: ' + esc(a.uid) + '">' +
+      '<td class="mark" aria-hidden="true"><i></i></td>' +
+      '<td class="who"><div class="nm">' + (a.nickname ? esc(a.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td><span class="tag ' + st.c + '">' + st.t + '</span>' + note + '</td>' +
+      '<td>' + Number(creditOf(a)).toLocaleString() + '</td>' +
+      '<td>' + traeExp(a) + '</td>' +
+      '<td class="c-acts">' +
+        '<button class="xs" data-tact="refresh" data-tuid="' + esc(a.uid) + '">刷新</button>' +
+        '<button class="xs" data-tact="' + (a.enabled ? 'disable' : 'enable') + '" data-tuid="' + esc(a.uid) + '">' + (a.enabled ? '停用' : '启用') + '</button>' +
+        '<button class="xs danger" data-tact="delete" data-tuid="' + esc(a.uid) + '">移除</button>' +
+      '</td></tr>';
+  }).join('');
+}
+async function traeAct(uid, action) {
+  try {
+    if (action === 'refresh') await traeAPI('accounts/' + encodeURIComponent(uid) + '/refresh', { method: 'POST' });
+    else if (action === 'enable' || action === 'disable') await traeAPI('accounts/' + encodeURIComponent(uid), { method: 'PATCH', body: JSON.stringify({ enabled: action === 'enable' }) });
+    else if (action === 'delete') {
+      if (!confirm('确定移除该 Trae 账号？')) return;
+      await traeAPI('accounts/' + encodeURIComponent(uid), { method: 'DELETE' });
+    }
+    loadTrae();
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
+}
+// CSP 禁止行内 onclick，统一走事件委托（与原生账号池 data-a 模式一致）。
+$('traeBody').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-tact]');
+  if (b) traeAct(b.dataset.tuid, b.dataset.tact);
+});
+if ($('btnTraeCheckin')) $('btnTraeCheckin').onclick = ev => traeScheduleRun('checkin', ev.currentTarget, '签到');
+if ($('btnTraeRefreshTokens')) $('btnTraeRefreshTokens').onclick = ev => traeScheduleRun('refresh', ev.currentTarget, 'Token 刷新');
+
+/* ── ZCode（Z.ai GLM Coding Plan：/zcode/api/*）────────────────────── */
+async function zcodeAPI(path, opts = {}) {
+  const h = Object.assign({}, opts.headers || {});
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  if (opts.body) h['Content-Type'] = 'application/json';
+  const r = await fetch('/zcode/api/' + path, Object.assign({}, opts, { headers: h }));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || d.message || ('HTTP ' + r.status));
+  return d;
+}
+
+/* ZCode 网页登录：POST login/start → { flow_id, authorize_url } → 浏览器授权 →
+   轮询 GET login/poll/{flow_id}（status: pending / ready / failed / expired）。 */
+let zcodeLoginTimer = null, zcodeFlowID = null;
+function startZcodeLogin() {
+  $('btnStartZcode').disabled = true;
+  $('zcodeLoad').hidden = false; $('zcodeErr').hidden = true; $('zcodeDone').hidden = true;
+  zcodeAPI('login/start', { method: 'POST', body: '{}' }).then(r => {
+    zcodeFlowID = r.flow_id;
+    $('zcodeUrl').textContent = r.authorize_url;
+    $('btnStartZcode').hidden = true;
+    $('zcodeLoad').hidden = true; $('zcodeReady').hidden = false;
+    zcodeLoginTimer = setInterval(pollZcodeLogin, 3000);
+  }).catch(e => {
+    $('zcodeLoad').hidden = true;
+    $('btnStartZcode').disabled = false;
+    $('zcodeErr').hidden = false;
+    $('zcodeErr').textContent = e.message;
+  });
+}
+function stopZcodePoll() { if (zcodeLoginTimer) { clearInterval(zcodeLoginTimer); zcodeLoginTimer = null; } }
+async function pollZcodeLogin() {
+  if (!zcodeFlowID) return;
+  try {
+    const r = await zcodeAPI('login/poll/' + encodeURIComponent(zcodeFlowID));
+    if (r.status === 'ready') {
+      stopZcodePoll(); zcodeFlowID = null;
+      $('zcodeReady').hidden = true;
+      $('zcodeDone').hidden = false;
+      $('zcodeDone').textContent = 'Z.AI 账号已授权并载入 ZCode 账号池';
+      setTimeout(() => { closeAdd(); loadOverview(true); if (view === 'zcode') loadZcode(); }, 1600);
+    } else if (r.status === 'failed' || r.status === 'expired') {
+      stopZcodePoll(); zcodeFlowID = null;
+      $('zcodeReady').hidden = true;
+      $('zcodeErr').hidden = false;
+      $('zcodeErr').textContent = (r.error || '登录' + (r.status === 'expired' ? '已超时' : '失败')) + '（关闭后重新添加）';
+    }
+  } catch (e) {
+    stopZcodePoll(); zcodeFlowID = null;
+    $('zcodeReady').hidden = true;
+    $('zcodeErr').hidden = false;
+    $('zcodeErr').textContent = e.message + '（关闭后重新添加）';
+  }
+}
+$('btnStartZcode').onclick = startZcodeLogin;
+
+/* ZCode 账号列表与操作（accounts 字段见 /zcode/api/accounts） */
+function zcodeStatus(a) {
+  if (a.status === 'expired') return { t: '已过期', c: 'bad', row: 'off' };
+  if (a.status === 'revoked') return { t: '已吊销', c: 'bad', row: 'off' };
+  if (!a.active) return { t: '已停用', c: 'warn', row: 'off' };
+  if (a.cooling_until && a.cooling_until * 1000 > Date.now()) return { t: '冷却中', c: 'warn', row: 'cool' };
+  return { t: '可用', c: 'ok', row: '' };
+}
+function zcodeCredits(a) {
+  // entitlements: [{model/plan, total, remaining...} 视上游字段] 汇总 remaining
+  const ents = a.entitlements || [];
+  let rem = 0, tot = 0, has = false;
+  ents.forEach(e => {
+    const r = e.remaining != null ? e.remaining : (e.credit_remaining != null ? e.credit_remaining : null);
+    const t = e.total != null ? e.total : (e.credit_total != null ? e.credit_total : null);
+    if (r != null) { has = true; rem += r; }
+    if (t != null) tot += t;
+  });
+  return has ? (tot > 0 ? rem + '/' + tot : String(rem)) : '—';
+}
+async function loadZcode() {
+  const tb = $('zcodeBody');
+  try {
+    const [st, d] = await Promise.all([
+      zcodeAPI('status'),
+      zcodeAPI('accounts'),
+    ]);
+    renderZcode(st, d.accounts || []);
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty"><div class="big">读取失败</div>' + esc(e.message) + '（ZCode 未启用或密钥不符，见 config zcode 段）</div></td></tr>';
+  }
+}
+function renderZcode(st, list) {
+  const tb = $('zcodeBody');
+  const usable = list.filter(a => zcodeStatus(a).c === 'ok').length;
+  const cooling = list.filter(a => zcodeStatus(a).row === 'cool').length;
+  const off = list.filter(a => zcodeStatus(a).row === 'off').length;
+  $('zTotal').textContent = list.length;
+  $('zHealthy').textContent = usable;
+  $('zCooling').textContent = cooling;
+  $('zDisabled').textContent = off;
+  $('zModels').textContent = (st.models || []).length || '-';
+  $('zcodeNote').textContent = list.length ? '' : '';
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty"><div class="big">ZCode 账号池是空的</div>点击右上角「添加账号」→「ZCode (Z.AI) 登录」标签页授权一个 Z.ai 账号</div></td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map(a => {
+    const stt = zcodeStatus(a);
+    const label = a.label || ('#' + a.id);
+    const short = (a.jwt || '').length > 18 ? a.jwt.slice(0, 18) + '…' : (a.jwt || '');
+    const plan = a.plan || '—';
+    return '<tr class="' + stt.row + '" title="id: ' + esc(String(a.id)) + '">' +
+      '<td class="mark" aria-hidden="true"><i></i></td>' +
+      '<td class="who"><div class="nm">' + esc(label) + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td><span class="tag ' + stt.c + '">' + stt.t + '</span></td>' +
+      '<td>' + esc(plan) + '</td>' +
+      '<td>' + zcodeCredits(a) + '</td>' +
+      '<td class="c-acts">' +
+        '<button class="xs" data-zact="' + (a.active ? 'disable' : 'enable') + '" data-zid="' + Number(a.id) + '">' + (a.active ? '停用' : '启用') + '</button>' +
+        '<button class="xs danger" data-zact="delete" data-zid="' + Number(a.id) + '">移除</button>' +
+      '</td></tr>';
+  }).join('');
+}
+async function zcodeAct(id, action) {
+  try {
+    if (action === 'enable' || action === 'disable') await zcodeAPI('accounts/toggle', { method: 'POST', body: JSON.stringify({ id, enabled: action === 'enable' }) });
+    else if (action === 'delete') {
+      if (!confirm('确定移除该 ZCode 账号？')) return;
+      await zcodeAPI('accounts/remove', { method: 'POST', body: JSON.stringify({ id }) });
+    }
+    loadZcode();
+  } catch (e) { toast('操作失败：' + e.message, 'err'); }
+}
+// CSP 禁止行内 onclick，统一走事件委托。
+$('zcodeBody').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-zact]');
+  if (b) zcodeAct(Number(b.dataset.zid), b.dataset.zact);
+});
+if ($('btnZcodeRefreshQuota')) $('btnZcodeRefreshQuota').onclick = async ev => {
+  const b = ev.currentTarget;
+  b.disabled = true; const old = b.textContent; b.textContent = '刷新中…';
+  try {
+    await zcodeAPI('quota/refresh', { method: 'POST', body: '{}' });
+    toast('配额刷新已触发', 'ok');
+    setTimeout(loadZcode, 4000);
+  } catch (e) { toast('刷新失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = old; }
+};
+
+/* ── AutoClaw（智谱澳龙云端沙箱，桥接 /autoclaw/api/*）──────────────── */
+async function autoclawAPI(path, opts = {}) {
+  const h = Object.assign({}, opts.headers || {});
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  if (opts.body) h['Content-Type'] = 'application/json';
+  const r = await fetch('/autoclaw' + path, Object.assign({}, opts, { headers: h }));
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.error || d.message || ('HTTP ' + r.status));
+  return d;
+}
+
+async function loadAutoclaw() {
+  const tb = $('autoclawBody');
+  if (!tb) return;
+  tb.innerHTML = '<tr><td colspan="6"><div class="empty">读取中…</div></td></tr>';
+  try {
+    const st = await autoclawAPI('/status');
+    const list = st.accounts || [];
+    let usable = 0, cooling = 0, off = 0, credits = 0;
+    list.forEach(a => {
+      if (a.disabled) off++;
+      else if (a.cooling) cooling++;
+      else usable++;
+      credits += Number(a.points) || 0;
+    });
+    $('acTotal').textContent = list.length;
+    $('acHealthy').textContent = usable;
+    $('acCooling').textContent = cooling;
+    $('acDisabled').textContent = off;
+    $('acCredits').textContent = list.length ? credits.toLocaleString() : '-';
+    if (!list.length) {
+      tb.innerHTML = '<tr><td colspan="6"><div class="empty"><div class="big">AutoClaw 账号池是空的</div>点击右上角「添加账号」→「AutoClaw 登录」标签页，手机号 + 短信验证码登录</div></td></tr>';
+      return;
+    }
+    tb.innerHTML = list.map(a => {
+      const stt = a.disabled ? { t: '已停用', c: 'warn', row: 'off' }
+        : a.cooling ? { t: '冷却中', c: 'warn', row: '' }
+        : { t: '可用', c: 'ok', row: '' };
+      const note = a.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(a.reason) + '</div>' : '';
+      return '<tr class="' + stt.row + '" title="uid: ' + esc(a.uid) + '">' +
+        '<td class="mark" aria-hidden="true"><i></i></td>' +
+        '<td class="who"><div class="nm">' + (a.nickname ? esc(a.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + '</div><div class="id">' + esc(String(a.uid).slice(0, 16)) + '</div></td>' +
+        '<td>' + esc(a.region || 'cn') + '</td>' +
+        '<td><span class="tag ' + stt.c + '">' + stt.t + '</span>' + note + '</td>' +
+        '<td>' + Number(a.points || 0).toLocaleString() + '</td>' +
+        '<td class="c-acts"><button class="xs" data-acact="checkin" data-acuid="' + esc(a.uid) + '" data-acregion="' + esc(a.region || 'cn') + '">签到</button>' +
+        '<button class="xs" data-acact="toggle" data-acuid="' + esc(a.uid) + '" data-acregion="' + esc(a.region || 'cn') + '">' + (a.disabled ? '启用' : '停用') + '</button>' +
+        '<button class="xs danger" data-acact="delete" data-acuid="' + esc(a.uid) + '" data-acregion="' + esc(a.region || 'cn') + '">移除</button></td></tr>';
+    }).join('');
+  } catch (e) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty"><div class="big">读取失败</div>' + esc(e.message) + '（autoclaw2api 服务未启动或密钥不符）</div></td></tr>';
+  }
+}
+
+async function autoclawCheckin(region, uid) {
+  const r = await autoclawAPI('/api/checkin', { method: 'POST', body: JSON.stringify({ region, uid, dry_run: false }) });
+  const rs = r.results || [];
+  const ok = rs.filter(x => x.ok || x.already_completed).length;
+  toast('签到完成：' + ok + '/' + rs.length + ' 成功', rs.length && ok ? 'ok' : 'warn');
+  try { await autoclawAPI('/api/maintain', { method: 'POST', body: '{}' }); } catch (_) {}
+  loadAutoclaw();
+}
+
+if ($('btnAutoClawRefresh')) $('btnAutoClawRefresh').onclick = async ev => {
+  const b = ev.currentTarget;
+  b.disabled = true; const old = b.textContent; b.textContent = '刷新中…';
+  try {
+    await autoclawAPI('/api/maintain', { method: 'POST', body: '{}' });
+    toast('积分已从上游刷新', 'ok');
+  } catch (e) { toast('刷新失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = old; }
+  loadAutoclaw();
+};
+
+if ($('btnAutoClawCheckin')) $('btnAutoClawCheckin').onclick = ev => {
+  const b = ev.currentTarget;
+  b.disabled = true; const old = b.textContent; b.textContent = '签到中…';
+  autoclawCheckin('all', '').catch(e => toast('签到失败：' + e.message, 'err')).finally(() => { b.disabled = false; b.textContent = old; });
+};
+// CSP 禁止行内 onclick，账号行内按钮走事件委托。
+$('autoclawBody').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-acact]');
+  if (!b) return;
+  const uid = b.dataset.acuid, region = b.dataset.acregion || 'cn';
+  const act = b.dataset.acact;
+  if (act === 'checkin') {
+    autoclawCheckin(region, uid).catch(e => toast('签到失败：' + e.message, 'err'));
+  } else if (act === 'toggle') {
+    const enable = b.textContent === '启用';
+    if (!enable && !confirm('停用后该账号不再参与选号与签到，可随时启用。确认停用？')) return;
+    autoclawAPI('/api/accounts/toggle', { method: 'POST', body: JSON.stringify({ uid, region, enable }) })
+      .then(r => {
+        if (r && r.error) { toast('操作失败：' + r.error, 'err'); return; }
+        toast(enable ? '账号已启用' : '账号已停用', 'ok');
+        loadAutoclaw();
+      })
+      .catch(e => toast('操作失败：' + e.message, 'err'));
+  } else if (act === 'delete') {
+    if (!confirm('移除将删除该 AutoClaw 账号的凭证文件，且不可恢复。确认移除？')) return;
+    autoclawAPI('/api/accounts/delete', { method: 'POST', body: JSON.stringify({ uid, region }) })
+      .then(r => {
+        if (r && r.error) { toast('移除失败：' + r.error, 'err'); return; }
+        toast('账号已移除', 'ok');
+        loadAutoclaw();
+      })
+      .catch(e => toast('移除失败：' + e.message, 'err'));
+  }
+});
+
+/* AutoClaw 登录：手机号 + 短信验证码（经 /autoclaw/api/login/cn/*） */
+let acCodeTimer = null;
+function acCodeCountdown(sec) {
+  const b = $('btnAcSendCode');
+  if (!b) return;
+  if (acCodeTimer) { clearInterval(acCodeTimer); acCodeTimer = null; }
+  b.disabled = true;
+  let left = sec;
+  const tick = () => {
+    b.textContent = left > 0 ? '重新发送(' + left + 's)' : '发送验证码';
+    if (left <= 0) { clearInterval(acCodeTimer); acCodeTimer = null; b.disabled = false; }
+    left--;
+  };
+  tick();
+  acCodeTimer = setInterval(tick, 1000);
+}
+if ($('btnAcSendCode')) $('btnAcSendCode').onclick = async ev => {
+  const b = ev.currentTarget;
+  const phone = ($('acPhone').value || '').trim();
+  if (!phone) { toast('请先输入手机号', 'warn'); return; }
+  if (b.disabled) return;
+  b.disabled = true; b.textContent = '发送中…';
+  try {
+    const r = await autoclawAPI('/api/login/cn/sendcode', { method: 'POST', body: JSON.stringify({ phone }) });
+    if (r && r.error) { toast('发送失败：' + r.error, 'err'); b.disabled = false; b.textContent = '发送验证码'; return; }
+    toast('验证码已发送，注意查收短信', 'ok');
+    acCodeCountdown(60);
+  } catch (e) { toast('发送失败：' + e.message, 'err'); b.disabled = false; b.textContent = '发送验证码'; }
+};
+if ($('btnAcLogin')) $('btnAcLogin').onclick = async ev => {
+  const b = ev.currentTarget;
+  const phone = ($('acPhone').value || '').trim();
+  const code = ($('acCode').value || '').trim();
+  if (!phone || !code) { toast('请输入手机号与验证码', 'warn'); return; }
+  b.disabled = true; const old = b.textContent; b.textContent = '登录中…';
+  $('acErr').hidden = true; $('acDone').hidden = true;
+  try {
+    const r = await autoclawAPI('/api/login/cn', { method: 'POST', body: JSON.stringify({ phone, code }) });
+    // autoclaw2api 失败也返回 HTTP 200，错误在 body.error —— 必须显式检查
+    if (r && r.error) {
+      $('acErr').hidden = false;
+      $('acErr').textContent = r.error;
+      return;
+    }
+    $('acDone').hidden = false;
+    $('acDone').textContent = '登录成功，已导入 AutoClaw 账号池' + (r.uid ? '（' + r.uid + '）' : '');
+    // 成功即清空表单，方便连续添加下一个账号
+    $('acPhone').value = ''; $('acCode').value = '';
+    setTimeout(() => { closeAdd(); loadOverview(true); if (view === 'autoclaw') loadAutoclaw(); }, 1600);
+  } catch (e) {
+    $('acErr').hidden = false; $('acErr').textContent = e.message;
+  } finally { b.disabled = false; b.textContent = old; }
 };
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
@@ -1211,6 +1842,8 @@ $('btnRefresh').onclick = async () => {
   } catch (e) { toast('刷新失败：' + e.message, 'err'); await loadOverview(true); }
   finally { b.disabled = false; b.textContent = '刷新'; }
   if (view === 'logs') loadLogs();
+  if (view === 'trae') loadTrae();
+  if (view === 'zcode') loadZcode();
 };
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
@@ -2235,6 +2868,16 @@ function renderUsageChart(series) {
            '峰值 ' + fmtTok(peak.tt) + '</text>';
   }
 
+  // 峰值标注：柱子够窄时文字压在柱顶，够宽时贴右侧避免和柱体重叠。
+  {
+    const px = xOf(peak.t);
+    const py = yOf(peak.tt);
+    const anchor = px > W - PR - 90 ? 'end' : 'middle';
+    out += '<text class="tk-peak" x="' + Math.max(PL, Math.min(W - PR, px)).toFixed(1) +
+           '" y="' + Math.max(10, py - 5).toFixed(1) + '" text-anchor="' + anchor + '">' +
+           '峰值 ' + fmtTok(peak.tt) + '</text>';
+  }
+
   // x 轴基线画在柱子之后，避免压在柱底
   out += '<line class="ax" x1="' + PL + '" y1="' + yBase + '" x2="' + (W - PR) +
          '" y2="' + yBase + '"/>';
@@ -2290,6 +2933,7 @@ async function warmUsageModelRates() {
 }
 
 async function loadUsage() {
+  loadTraeUsage();
   const q = trangeQuery('usRange', true);
   try {
     await warmUsageModelRates();
@@ -2761,6 +3405,7 @@ async function loadPackages(force) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
     $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">读取失败：' + esc(e.message) + '</div>';
   }
+  loadTraePackages();
 }
 
 /* ── 积分到期提醒（首页卡片）────────────────────────────────────────── */
@@ -2932,3 +3577,52 @@ if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 
 // 「刷新」始终实时查（显式 force，不依赖事件对象真值）
 if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
+
+if ($('btnPk')) $('btnPk').onclick = loadPackages;
+
+/* ── Trae CN：用量 + 积分构成（数据源 /trae/admin/api/*）────────────── */
+async function loadTraeUsage() {
+  const box = $('usTraeBox'), tb = $('usTraeBody');
+  try {
+    const d = await traeAPI('usage');
+    const days = d.days || [];
+    if (!days.length) { box.hidden = true; return; }
+    box.hidden = false;
+    const num = n => Number(n || 0).toLocaleString();
+    tb.innerHTML = days.slice(0, 14).map(day =>
+      Object.entries(day.by_account || {}).map(([uid, e]) =>
+        '<tr><td class="mark" aria-hidden="true"><i></i></td>' +
+        '<td class="who"><div class="nm">' + esc('用户' + uid.slice(-7)) + '</div><div class="id">' + esc(uid) + '</div></td>' +
+        '<td class="num">' + num(e.requests) + '</td><td class="num">' + num(e.errors) + '</td>' +
+        '<td class="num">' + num(e.prompt_tokens) + '</td>' +
+        '<td class="num">' + num(e.completion_tokens) + '</td>' +
+        '<td class="num">' + num(e.total_tokens) + '</td>' +
+        '<td>' + esc(day.date) + '</td></tr>'
+      ).join('')
+    ).join('') || '<tr><td colspan="8" class="empty">暂无数据</td></tr>';
+    const t = days[0] || {};
+    $('usTraeNote').textContent = '最近 ' + Math.min(days.length, 14) + ' 天 · 今天 ' + num(t.requests) + ' 次 / ' + num(t.total_tokens) + ' tokens';
+  } catch (_) { box.hidden = true; }
+}
+async function loadTraePackages() {
+  const box = $('pkTraeBox'), tb = $('pkTraeBody');
+  try {
+    const d = await traeAPI('credits');
+    const list = d.accounts || [];
+    if (!list.length) { box.hidden = true; return; }
+    box.hidden = false;
+    const num = n => Number(n || 0).toLocaleString();
+    tb.innerHTML = list.map(a =>
+      '<tr><td class="mark' + (a.disabled ? ' bad' : a.cooling ? ' warn' : ' ok') + '" aria-hidden="true"><i></i></td>' +
+      '<td class="who"><div class="nm">' + esc(a.nickname || a.uid) + '</div><div class="id">' + esc(a.uid) + '</div></td>' +
+      '<td class="num">' + num(a.remain) + ' / ' + num(a.limit) + '</td>' +
+      '<td class="num">' + num(a.used) + '</td>' +
+      '<td class="num">' + num(a.packs) + '</td>' +
+      '<td>' + (a.checked_in
+        ? '<span class="tag ok">已签到 +' + num(a.checkin_credits) + '</span>'
+        : (a.checkin_enable ? '<span class="tag warn">未签到</span>' : '<span class="tag">—</span>')) + '</td>' +
+      '</tr>'
+    ).join('');
+    $('pkTraeNote').textContent = '共 ' + list.length + ' 个账号 · 剩余合计 ' + num(list.reduce((s, a) => s + (a.remain || 0), 0));
+  } catch (_) { box.hidden = true; }
+}

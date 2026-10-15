@@ -13,13 +13,37 @@ services:
     user: "${PUID:-10001}:${PGID:-10001}"
     environment:
       - TZ=Asia/Shanghai
+      # TRAE 网页登录回调：容器内必须绑 0.0.0.0 才能被宿主机映射到；
+      # 下面 ports 已限定 127.0.0.1 前缀，外部机器仍然访问不到，安全边界不变。
+      - TW2A_CALLBACK_HOST=0.0.0.0
     ports:
       - "7863:7863"
+      - "127.0.0.1:18080:18080"
     volumes:
       - ./auths:/app/auths
+      - ./trae-auths:/app/trae-auths
+      - ./zcode-data:/app/zcode-data
       - ./data:/app/data
       # 注意：宿主机必须先有 config.json（cp config.example.json config.json）。
       # 缺失时 Docker 会把挂载点创建成目录 → 容器启动失败（程序会自动生成配置，
       # 但前提是它能以文件形式写入 —— 挂载目录会挡住这条路径）。
       # 不挂 :ro：面板「配置」页需要写回此文件（保存后热生效）。
       - ./config.json:/app/config.json
+
+  # AutoClaw 上游（Python，7865）——源码在相邻目录，随本 compose 一并构建启动。
+  # 目录名可覆盖：分发包里是 ../autoclaw2api（.env 里 AUTOCLAW_CONTEXT=../autoclaw2api）。
+  autoclaw2api:
+    build: ${AUTOCLAW_CONTEXT:-../autoclaw2api-main}
+    container_name: autoclaw2api
+    restart: unless-stopped
+    ports:
+      - "7865:7865"
+    volumes:
+      - ${AUTOCLAW_CONTEXT:-../autoclaw2api-main}/auths:/app/auths
+      - ${AUTOCLAW_CONTEXT:-../autoclaw2api-main}/data:/app/data
+      - ${AUTOCLAW_CONTEXT:-../autoclaw2api-main}/config.json:/app/config.json
+
+# 单一固定网络名（沿用历史 external 名）：部署目录改名不影响容器互访。
+networks:
+  default:
+    name: autoclaw2api-main_default

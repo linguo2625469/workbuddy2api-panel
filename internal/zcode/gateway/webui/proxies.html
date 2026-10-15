@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zcode2Api · Proxies</title>
+<link rel="stylesheet" href="app.css?v=1.0.6">
+</head>
+<body>
+<div id="app" style="display:none">
+<header class="admin-header"><div class="admin-header-inner">
+    <div class="admin-brand"><span class="brand-word">Zcode<b>2</b>Api</span></div>
+    <nav class="admin-nav">
+      <a class="admin-nav-link " href="./">Account Pool</a>
+      <a class="admin-nav-link active" href="proxies.html">Proxies</a>
+      <a class="admin-nav-link " href="settings.html">Settings</a>
+    </nav>
+    <div class="admin-header-right">
+      <a class="admin-header-icon-btn" href="https://github.com/D3-vin/Zcode2Api" target="_blank" title="GitHub"><svg viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg></a>
+      <a class="admin-header-icon-btn" href="https://t.me/D3_vin" target="_blank" title="Telegram"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></a>
+      <span class="admin-header-version" id="hdr-version">v1.0.0</span>
+      <button class="admin-header-icon-btn" title="Log out" onclick="doLogout()"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button>
+    </div>
+  </div></header>
+<main class="admin-main">
+  <div class="page-hd">
+    <div>
+      <div class="page-title">Proxy Settings</div>
+      <div class="page-sub">Centralized management of HTTP / SOCKS5 egress lines · bind per account or rotate in the pool</div>
+    </div>
+    <div class="page-actions">
+      <button class="page-action-btn" onclick="probeCurrent(this)"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>Test current line</button>
+      <button class="page-action-btn" onclick="openModal('modal-import')"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Import lines</button>
+      <button class="page-action-btn page-action-btn-primary" onclick="openModal('modal-add')"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add proxy</button>
+    </div>
+  </div>
+
+  <div class="settings-card egress-card">
+    <span class="egress-dot" id="eg-dot"></span>
+    <div>
+      <div class="settings-sub" style="margin:0">Current server egress</div>
+      <div style="font-size:15px;font-weight:600" id="eg-val">Not tested yet</div>
+      <div class="hint">Public IP via ip.sb → ipwho.is → ipapi.is fallback chain</div>
+    </div>
+  </div>
+
+  <div class="proxy-grid">
+    <div class="settings-card">
+      <div class="section-head" style="margin:0"><div class="settings-title">Proxy lines</div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <span class="count-badge" id="pl-count">0 lines</span>
+        <button class="act-btn danger" style="height:26px;padding:0 10px;border:1px solid rgba(248,81,73,.4)" onclick="clearAll()">Clear all</button>
+      </div></div>
+      <div class="settings-sub">Create here, then select per account in Account Pool (Egress line)</div>
+      <div class="proxy-lines" id="lines"><div class="empty-state">No proxy lines yet</div></div>
+    </div>
+    <div class="settings-card">
+      <div class="settings-title">Connection format</div>
+      <div class="settings-sub" style="margin-bottom:14px">Proxies with authentication are supported</div>
+      <div class="legend-row"><span class="chip chip-http">HTTP</span><code>http://host:port</code></div>
+      <div class="legend-row"><span class="chip chip-s5">S5</span><code>socks5://host:port</code></div>
+      <div class="legend-row"><span class="chip chip-auth">AUTH</span><code>http://user:pass@host:port</code></div>
+      <div class="help-box">Lines are just egress addresses. What to use — a specific line or <b>Pool (random from all)</b> — is chosen per account in Account Pool → Edit → Egress line. Two failed probes auto-pause a line.</div>
+    </div>
+  </div>
+</main>
+</div>
+
+<div class="modal-overlay" id="modal-add">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('modal-add')">✕</button>
+    <div class="modal-title">Add proxy</div>
+    <div class="modal-sub">HTTP, HTTPS, SOCKS4/5 — optionally with user:pass auth</div>
+    <div class="dialog-body">
+      <div><span class="dialog-label">URL</span><input class="input" id="px-url" placeholder="user:pass@host:port or http://host:port"></div>
+      <div><span class="dialog-label">Name</span><input class="input" id="px-name" placeholder="main-dc (optional)"></div>
+      <div><span class="dialog-label">Bind to account</span>
+        <select class="input" id="px-bind"><option value="0">Pool (all accounts)</option></select>
+        <div class="dialog-help" style="margin-top:6px">Line vs Pool is chosen per account in Account Pool → Edit → Egress line.</div></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="dialog-btn" onclick="closeModal('modal-add')">Cancel</button>
+      <button class="dialog-btn-primary" onclick="saveProxy()">Add</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-import">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('modal-import')">✕</button>
+    <div class="modal-title">Import proxy lines</div>
+    <div class="modal-sub">One line per row — the same format as proxy.txt</div>
+    <div class="dialog-body">
+      <textarea class="input" id="imp-text" rows="7" placeholder="user:pass@ip:port&#10;http://user:pass@ip:port"></textarea>
+      <div class="dialog-help">Duplicates are skipped. New lines start unbound (pool).</div>
+    </div>
+    <div class="dialog-actions">
+      <button class="dialog-btn" onclick="closeModal('modal-import')">Cancel</button>
+      <button class="dialog-btn-primary" onclick="doImportLines()">Import</button>
+    </div>
+  </div>
+</div>
+<div class="toast-container" id="toasts"></div>
+<script src="app.js?v=1.0.6"></script>
+<script>
+const PAGE = 'proxies';
+let PROXIES = [];
+var SHOW_ALL = false;
+const PROXY_PAGE = 20;
+function proxShown() { return SHOW_ALL ? PROXIES : PROXIES.slice(0, PROXY_PAGE); }
+function toggleAll() { SHOW_ALL = !SHOW_ALL; renderProxyList(); }
+function renderProxyList() {
+  const el = document.getElementById('lines');
+  if (!PROXIES.length) { el.innerHTML = '<div class="empty-state">No proxy lines yet</div>'; return; }
+  const shown = proxShown();
+  el.innerHTML = shown.map(p => `
+    <div class="proxy-line ${p.paused ? 'paused' : ''}">
+      <div class="proxy-line-name">${p.name || 'line'}${p.paused ? ' <span class="badge badge-cooling">paused</span>' : ''}${p.bound_to_account ? ' <span class="badge badge-active">#' + p.bound_to_account + '</span>' : ''}</div>
+      <div class="proxy-line-url">${p.url}</div>
+      <div style="display:flex;gap:6px">
+        <button class="act-btn icon" title="Probe: public IP + latency" onclick="probeOne(${p.id},this)"><svg viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></button>
+        <button class="act-btn icon danger" title="Delete line" onclick="delProxy(${p.id})"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+      </div>
+    </div>`).join('') + (PROXIES.length > PROXY_PAGE
+      ? `<button class="page-action-btn" style="margin-top:8px" onclick="toggleAll()">${SHOW_ALL ? 'Show first ' + PROXY_PAGE : 'Show all ' + PROXIES.length}</button>`
+      : '');
+}
+async function probeOne(id, btn) {
+  spinBtn(btn);
+  const d = await post('api/proxies/probe', { id });
+  if (d.error) toast('Probe failed: ' + d.error, 'err'); else toast('IP: ' + d.ip + ' · ' + d.latency_ms + 'ms', 'ok');
+  await refreshProxies();
+}
+async function probeCurrent(btn) {
+  spinBtn(btn);
+  const d = await post('api/proxies/probe', {});
+  const dot = document.getElementById('eg-dot');
+  if (d.error) { dot.className = 'egress-dot bad'; document.getElementById('eg-val').textContent = d.error; }
+  else { dot.className = 'egress-dot ok'; document.getElementById('eg-val').textContent = d.ip + ' · ' + d.latency_ms + 'ms'; }
+}
+async function saveProxy() {
+  const url = document.getElementById('px-url').value.trim(); if (!url) return;
+  await post('api/proxies/save', { url, name: document.getElementById('px-name').value.trim(), mode: 'sticky', bound_to_account: parseInt(document.getElementById('px-bind').value || '0', 10) });
+  closeModal('modal-add'); toast('Proxy added', 'ok'); refreshProxies();
+}
+async function delProxy(id) { await post('api/proxies/delete', { id }); await refreshProxies(); }
+async function clearAll() {
+  if (!PROXIES.length) return;
+  if (!confirm('Delete all ' + PROXIES.length + ' proxy lines?')) return;
+  for (const p of PROXIES) await post('api/proxies/delete', { id: p.id });
+  SHOW_ALL = false;
+  toast('All lines deleted', 'ok');
+  await refreshProxies();
+}
+async function doImportLines() {
+  const lines = document.getElementById('imp-text').value.split('\n').map(x => x.trim()).filter(Boolean);
+  let added = 0;
+  for (const l of lines) { const d = await post('api/proxies/save', { url: l, name: '', mode: 'sticky' }); if (d.ok) added++; }
+  toast('Imported ' + added + ' line(s)', 'ok'); closeModal('modal-import'); refreshProxies();
+}
+async function refreshProxies() {
+  const d = await j('api/proxies'); PROXIES = d.profiles || [];
+  document.getElementById('pl-count').textContent = PROXIES.length + ' lines';
+  renderProxyList();
+}
+function boot() { refreshProxies(); probeCurrent(); }
+gate(boot);
+</script>
+</body>
+</html>

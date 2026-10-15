@@ -2,6 +2,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,78 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// Trae Trae CN（traework）完整 handler（可选；nil = 不挂载）。挂载在 /trae/
+	// 前缀下：管理面 /trae/admin、网页登录回调 /trae/authorize、独立 API /trae/v1/*。
+	Trae http.Handler
+
+	// TraeChat trae 聊天分流目标（POST /v1/chat/completions 命中 trae 模型时转发；
+	// 请求路径保持不变，trae 内部自鉴权）。nil = 不分流。
+	TraeChat http.Handler
+
+	// TraeKnownModel 判断（已剥 trae/ 前缀的）model 是否 trae 已知模型；与
+	// TraeChat 配套，nil 时仅按显式 "trae/" 前缀分流。
+	TraeKnownModel func(model string) bool
+
+	// TraeExtraModels 追加进 /v1/models 的 trae 模型条目；nil = 不追加。
+	TraeExtraModels func() []map[string]any
+
+	// TraeHealthy trae 池当前是否有健康账号；与 TraeKnownModel 配套。
+	// 统一名跨池兜底用：trae 池全冷却时，同名模型自动落到 workbuddy CN 目录。
+	TraeHealthy func() bool
+
+	// ZcodeChat zcode（Z.ai GLM Coding Plan）聊天分流目标。nil = 不分流。
+	ZcodeChat http.Handler
+	// ZcodeKnownModel 判断 model 是否 zcode 目录已知模型（大小写/别名归一）。
+	ZcodeKnownModel func(model string) bool
+	// ZcodeExtraModels 追加进 /v1/models 的 zcode 模型条目；nil = 不追加。
+	ZcodeExtraModels func() []map[string]any
+	// ZcodeHealthy zcode 池当前是否有健康账号（跨池兜底判定）。
+	ZcodeHealthy func() bool
+	// ZcodePanel zcode 完整管理面（dashboard + OAuth 登录 + 账号管理），
+	// 挂载在 /zcode/ 前缀下。
+	ZcodePanel http.Handler
+
+	// AutoclawChat AutoClaw（智谱澳龙云端沙箱，经 autoclaw2api 桥接）聊天
+	// 分流目标（OpenAI 兼容反向代理）。nil = 不分流。
+	AutoclawChat http.Handler
+	// AutoclawKnownModel 判断 model 是否 autoclaw 目录已知模型。
+	AutoclawKnownModel func(model string) bool
+	// AutoclawExtraModels 追加进 /v1/models 的 autoclaw 模型条目；nil = 不追加。
+	AutoclawExtraModels func() []map[string]any
+	// AutoclawHealthy autoclaw2api 是否可达且有健康账号（跨池兜底判定）。
+	AutoclawHealthy func() bool
+	// AutoclawPanel autoclaw2api 整站反代（状态/签到/登录 API），挂载在
+	// /autoclaw/ 前缀下，供主面板页面调用。
+	AutoclawPanel http.Handler
+}
+
+// normModelName 模型名规范化（跨池同名判定用）：小写、只留字母数字。
+// "DeepSeek-V4.1-Flash" / "cn:deepseek-v4.1-flash" 裸名 → "deepseekv41flash"。
+func normModelName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// cnModelID 在 CN 动态目录里找与 bare 规范化同名的模型，返回目录里的规范 ID
+// （重写 cn: 前缀时用目录拼写，不沿用 trae 侧大小写）。
+func (h *Handler) cnModelID(bare string) (string, bool) {
+	want := normModelName(bare)
+	if want == "" {
+		return "", false
+	}
+	for _, mi := range h.fetchDynamicModels() {
+		if normModelName(mi.ID) == want {
+			return mi.ID, true
+		}
+	}
+	return "", false
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -142,10 +215,35 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.Panel != nil {
 		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
 	}
+	if cfg.Trae != nil {
+		// /trae/* 剥前缀后交给 trae handler（其内部路由是根路径形态）。
+		h.mux.Handle("/trae/", http.StripPrefix("/trae", cfg.Trae))
+	}
+	if cfg.ZcodePanel != nil {
+		// /zcode/* 剥前缀后交给 zcode server（dashboard + OAuth 登录 + 账号管理）。
+		h.mux.Handle("/zcode/", http.StripPrefix("/zcode", cfg.ZcodePanel))
+	}
+	if cfg.AutoclawPanel != nil {
+		// /autoclaw/* 剥前缀后整站反代到 autoclaw2api（状态/签到/登录 API）。
+		// chat 分流（AutoclawChat）不经 mux、路径本就是 /v1/*，无需剥前缀。
+		h.mux.Handle("/autoclaw/", http.StripPrefix("/autoclaw", cfg.AutoclawPanel))
+	}
 	return h
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Zcode 分流（命中即由 zcode 上游处理）。
+	if h.zcodeRoute(w, r) {
+		return
+	}
+	// Trae 分流（命中即由 trae 上游处理，不走 workbuddy 账号池）。
+	if h.traeRoute(w, r) {
+		return
+	}
+	// AutoClaw 分流（链尾：沙箱唤醒延迟大，做 trae 之后的兜底池）。
+	if h.autoclawRoute(w, r) {
+		return
+	}
 	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
 		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
 		if h.loadLive().RecordClientInfo {
@@ -166,6 +264,232 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mux.ServeHTTP(w, r)
+}
+
+// traePeekLimitMB chat 请求体分流预读上限（与 trae 侧 maxBodyBytes 8MB 对齐）。
+const traePeekLimitMB = 8
+
+// zcodeRoute 判定 chat 请求是否分流到 zcode（Z.ai）上游，命中时改写请求并转发。
+// 优先级最高：裸名命中 zcode 模型 → zcode 池；zcode 池无健康账号时按链
+// zcode → trae → workbuddy 兜底（body 改写后返回 false，由后续路由接力）。
+// 显式 "zcode/" 前缀强制 zcode，不兜底。
+func (h *Handler) zcodeRoute(w http.ResponseWriter, r *http.Request) bool {
+	if h.cfg.ZcodeChat == nil || r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, traePeekLimitMB<<20))
+	if err != nil {
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(nil))
+		return false
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var peek struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &peek); err != nil {
+		return false
+	}
+	model := strings.TrimSpace(peek.Model)
+	prefixed := strings.HasPrefix(model, "zcode/")
+	bare := strings.TrimPrefix(model, "zcode/")
+	known := !prefixed && bare != "" && bare != "auto" &&
+		h.cfg.ZcodeKnownModel != nil && h.cfg.ZcodeKnownModel(bare)
+	if !prefixed && !known {
+		return false
+	}
+	// 跨池兜底（仅裸名）：zcode 池无健康账号 → 依次试 trae / workbuddy。
+	if !prefixed && known && h.cfg.ZcodeHealthy != nil && !h.cfg.ZcodeHealthy() {
+		rewrite := func(newModel string) bool {
+			var obj map[string]any
+			if json.Unmarshal(body, &obj) == nil {
+				obj["model"] = newModel
+				if nb, merr := json.Marshal(obj); merr == nil {
+					r.Body = io.NopCloser(bytes.NewReader(nb))
+					return true
+				}
+			}
+			return false
+		}
+		// trae 有同名模型且健康 → 还原裸名交 traeRoute 接力。
+		if h.cfg.TraeKnownModel != nil && h.cfg.TraeKnownModel(bare) &&
+			h.cfg.TraeHealthy != nil && h.cfg.TraeHealthy() {
+			_ = rewrite(bare)
+			return false
+		}
+		// autoclaw 有同名模型且健康 → 还原裸名交 autoclawRoute 接力。
+		if h.cfg.AutoclawKnownModel != nil && h.cfg.AutoclawKnownModel(bare) &&
+			h.cfg.AutoclawHealthy != nil && h.cfg.AutoclawHealthy() {
+			_ = rewrite(bare)
+			return false
+		}
+		// workbuddy CN 有同名 → cn:<规范名> 落主链路。
+		if cnID, ok := h.cnModelID(bare); ok {
+			rewrite("cn:" + cnID)
+			return false
+		}
+		// 都没有 → 照常进 zcode，由 zcode 侧报明确的错。
+	}
+	if prefixed {
+		// 剥 "zcode/" 前缀：zcode catalog 按裸名解析。
+		var obj map[string]any
+		if json.Unmarshal(body, &obj) == nil {
+			obj["model"] = bare
+			if nb, merr := json.Marshal(obj); merr == nil {
+				r.Body = io.NopCloser(bytes.NewReader(nb))
+				// body 重写后长度变了，ContentLength 必须同步——否则下游
+				// http.Client 按旧 Content-Length 发送，报 ContentLength=N
+				// with Body length=M 直接失败。
+				r.ContentLength = int64(len(nb))
+			}
+		}
+	}
+	h.serveProxiedChat(w, r, "zcode", bare, h.cfg.ZcodeChat)
+	return true
+}
+
+// traeRoute 判定 chat 请求是否分流到 trae 上游，命中时改写请求并转发，返回 true。
+//
+// 分流规则（优先级从高到低）：
+//  1. model 带 "trae/" 显式前缀 → 剥前缀后转发（协议上与 workbuddy 的 "cn:"/
+//     "global:" 前缀风格对称，强制指定不依赖模型表）；
+//  2. model 为 trae 已知模型（TraeKnownModel 动态/静态表）→ 原样转发；
+//  3. 其余（含空/auto/cn:/global: 及 workbuddy 模型名）→ 交主链路。
+//
+// body 预读后立即回填（io.NopCloser），主链路/trae 两侧都能完整重读。
+// 注意：trae 分流请求不进 workbuddy 的 reqlog 归档（trae 侧自有错误日志）。
+func (h *Handler) traeRoute(w http.ResponseWriter, r *http.Request) bool {
+	if h.cfg.TraeChat == nil || r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, traePeekLimitMB<<20))
+	if err != nil {
+		// 读不出 body：回填空 body 交主链路走原有报错路径。
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(nil))
+		return false
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var peek struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &peek); err != nil {
+		return false // 非 JSON body：主链路自有 400 处理
+	}
+	model := strings.TrimSpace(peek.Model)
+	prefixed := strings.HasPrefix(model, "trae/")
+	if prefixed {
+		model = strings.TrimPrefix(model, "trae/")
+	}
+	known := !prefixed && model != "" && model != "auto" &&
+		h.cfg.TraeKnownModel != nil && h.cfg.TraeKnownModel(model)
+	if !prefixed && !known {
+		return false
+	}
+	// 统一名跨池兜底：裸名命中 trae 模型、但 trae 池当前没有健康账号（全冷却/
+	// 禁用/空池）时，若 workbuddy CN 目录有同名模型，把 model 重写为 cn:<规范名>
+	// 落回主链路。显式 "trae/" 前缀不兜底（用户点名 trae 出口，就该拿到 trae 的错）。
+	if !prefixed && known && h.cfg.TraeHealthy != nil && !h.cfg.TraeHealthy() {
+		// autoclaw 有同名模型且健康 → 还原裸名交 autoclawRoute 接力。
+		if h.cfg.AutoclawKnownModel != nil && h.cfg.AutoclawKnownModel(model) &&
+			h.cfg.AutoclawHealthy != nil && h.cfg.AutoclawHealthy() {
+			var obj map[string]any
+			if json.Unmarshal(body, &obj) == nil {
+				obj["model"] = model
+				if nb, merr := json.Marshal(obj); merr == nil {
+					r.Body = io.NopCloser(bytes.NewReader(nb))
+					return false
+				}
+			}
+		}
+		if cnID, ok := h.cnModelID(model); ok {
+			var obj map[string]any
+			if json.Unmarshal(body, &obj) == nil {
+				obj["model"] = "cn:" + cnID
+				if nb, merr := json.Marshal(obj); merr == nil {
+					r.Body = io.NopCloser(bytes.NewReader(nb))
+					return false
+				}
+			}
+		}
+		// workbuddy 也没有同名模型 → 照常进 trae，由 trae 侧报明确的错。
+	}
+	if prefixed {
+		// 剥 "trae/" 前缀：trae 侧 mapModel 只认裸 config_name。
+		var obj map[string]any
+		if json.Unmarshal(body, &obj) == nil {
+			obj["model"] = model
+			if nb, merr := json.Marshal(obj); merr == nil {
+				body = nb
+				r.Body = io.NopCloser(bytes.NewReader(body))
+				r.ContentLength = int64(len(body)) // 同步长度（见 zcodeRoute 注释）
+			}
+		}
+	}
+	h.serveProxiedChat(w, r, "trae", model, h.cfg.TraeChat)
+	return true
+}
+
+// autoclawRoute 判定 chat 请求是否分流到 AutoClaw 上游（经 autoclaw2api 桥接，
+// OpenAI 兼容），命中时转发，返回 true。链尾池：沙箱唤醒 + agent 流延迟大，
+// 同名模型优先级 zcode → trae → workbuddy → autoclaw；显式 "autoclaw/" 前缀
+// 强制走 autoclaw，不兜底。
+func (h *Handler) autoclawRoute(w http.ResponseWriter, r *http.Request) bool {
+	if h.cfg.AutoclawChat == nil || r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, traePeekLimitMB<<20))
+	if err != nil {
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(nil))
+		return false
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var peek struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &peek); err != nil {
+		return false
+	}
+	model := strings.TrimSpace(peek.Model)
+	prefixed := strings.HasPrefix(model, "autoclaw/")
+	bare := strings.TrimPrefix(model, "autoclaw/")
+	known := !prefixed && bare != "" && bare != "auto" &&
+		h.cfg.AutoclawKnownModel != nil && h.cfg.AutoclawKnownModel(bare)
+	if !prefixed && !known {
+		return false
+	}
+	// 跨池兜底（仅裸名）：autoclaw 不可达/无健康账号 → cn: 重写落主链路。
+	if !prefixed && known && h.cfg.AutoclawHealthy != nil && !h.cfg.AutoclawHealthy() {
+		if cnID, ok := h.cnModelID(bare); ok {
+			var obj map[string]any
+			if json.Unmarshal(body, &obj) == nil {
+				obj["model"] = "cn:" + cnID
+				if nb, merr := json.Marshal(obj); merr == nil {
+					r.Body = io.NopCloser(bytes.NewReader(nb))
+					return false
+				}
+			}
+		}
+		// 主链路也没有同名模型 → 照常进 autoclaw，由其报明确的错。
+	}
+	if prefixed {
+		// autoclaw2api 的模型 id 与其 /v1/models 一致（cn 模型裸名、global 模型
+		// 带 global/ 前缀），剥掉主网关的 "autoclaw/" 后原样透传。
+		var obj map[string]any
+		if json.Unmarshal(body, &obj) == nil {
+			obj["model"] = bare
+			if nb, merr := json.Marshal(obj); merr == nil {
+				r.Body = io.NopCloser(bytes.NewReader(nb))
+				r.ContentLength = int64(len(nb)) // 同步长度（见 zcodeRoute 注释）
+			}
+		}
+	}
+	h.serveProxiedChat(w, r, "autoclaw", bare, h.cfg.AutoclawChat)
+	return true
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -276,11 +600,90 @@ const (
 
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
+// Trae/Zcode ExtraModels 非空时追加对应上游条目并做同名统一。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	data := h.modelList()
+	var extras [][]map[string]any
+	if h.cfg.TraeExtraModels != nil {
+		extras = append(extras, h.cfg.TraeExtraModels())
+	}
+	if h.cfg.ZcodeExtraModels != nil {
+		extras = append(extras, h.cfg.ZcodeExtraModels())
+	}
+	if h.cfg.AutoclawExtraModels != nil {
+		extras = append(extras, h.cfg.AutoclawExtraModels())
+	}
+	if len(extras) > 0 {
+		data = h.unifiedModelList(data, extras...)
+	}
+	// 统一最长上下文：所有模型对外上报 context_length / max_allowed_size 拉满
+	// 1M——客户端（Codex/Cline 等）按此值规划输入；上游实际限制仍由上游自行把关。
+	for _, e := range data {
+		e["context_length"] = 1000000
+		e["max_allowed_size"] = 1000000
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   data,
 	})
+}
+
+// unifiedModelList 同名模型统一：extra 上游裸名与 cn: 目录规范化同名的，合并为
+// 单条目——id 用上游裸名（如 deepseek-v4.1-flash / glm-5.3），owned_by 按
+// 「extra + workbuddy」拼接（多池同名继续追加，如 zcode-glm+trae-solo+workbuddy），
+// 富字段（倍率/上下文/档位）继承 cn: 条目；cn: 孪生从列表移除（显式 cn: 名仍可调用，
+// 只是不再单列）。extra 之间同名也合并；其余 extra 模型原样追加。
+func (h *Handler) unifiedModelList(data []map[string]any, extraSets ...[]map[string]any) []map[string]any {
+	cnIdx := map[string]int{}
+	for i, e := range data {
+		if id, _ := e["id"].(string); strings.HasPrefix(id, "cn:") {
+			cnIdx[normModelName(strings.TrimPrefix(id, "cn:"))] = i
+		}
+	}
+	drop := map[int]bool{}
+	mergedIdx := map[string]int{} // 规范化裸名 → unified 下标（跨 extra 去重）
+	unified := make([]map[string]any, 0, 16)
+	addOwned := func(e map[string]any, part string) {
+		ob, _ := e["owned_by"].(string)
+		parts := strings.Split(ob, "+")
+		for _, p := range parts {
+			if p == part {
+				return
+			}
+		}
+		// extra 来源放前面，保持既有 "trae-solo+workbuddy" 顺序。
+		e["owned_by"] = part + "+" + ob
+	}
+	for _, extra := range extraSets {
+		for _, te := range extra {
+			tid, _ := te["id"].(string)
+			tOwned, _ := te["owned_by"].(string)
+			norm := normModelName(tid)
+			if idx, ok := mergedIdx[norm]; ok {
+				// 与前一个 extra 集已合并的同名条目：只追加来源标记。
+				addOwned(unified[idx], tOwned)
+				continue
+			}
+			if idx, ok := cnIdx[norm]; ok {
+				ce := data[idx]
+				ce["id"] = tid
+				addOwned(ce, tOwned)
+				mergedIdx[norm] = len(unified)
+				unified = append(unified, ce)
+				drop[idx] = true
+				continue
+			}
+			mergedIdx[norm] = len(unified)
+			unified = append(unified, te)
+		}
+	}
+	filtered := make([]map[string]any, 0, len(data))
+	for i, e := range data {
+		if !drop[i] {
+			filtered = append(filtered, e)
+		}
+	}
+	return append(filtered, unified...)
 }
 
 // fmtCreditsPrefix 从上游 credits 原文提取倍率并格式化为 "[x0.05 credit]"。

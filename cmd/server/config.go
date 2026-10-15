@@ -213,6 +213,70 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	Trae struct {
+		// Enabled Trae CN（traework）上游开关，缺省 true。关闭后 /v1/models 不列
+		// trae 模型、chat 不分流到 trae 上游，/trae/ 管理面返回 404。
+		Enabled bool `json:"enabled"`
+		// APIKey trae 侧鉴权密钥（API 与 /trae/admin 写操作共用）；空 = 复用主 api_key。
+		APIKey string `json:"api_key"`
+		// AuthDir trae 账号凭证目录（trae-*.json），与主账号目录分开。
+		AuthDir string `json:"auth_dir"`
+		// StateFile trae 账号池状态文件，与主 state 分开。
+		StateFile string `json:"state_file"`
+		// CallbackPort TRAE 网页登录回调监听端口（127.0.0.1），"0" = 不起回调。
+		CallbackPort string `json:"callback_port"`
+		// CallbackHost 回调监听绑定地址，默认 "127.0.0.1"；Docker 部署需设
+		// "0.0.0.0"（容器内绑回环宿主机映射不到），compose 侧用
+		// "127.0.0.1:18080:18080" 保持仅宿主机本机可达。
+		CallbackHost string `json:"callback_host"`
+		// DefaultModel trae 侧默认模型（客户端 model 留空/未知时回落）。
+		DefaultModel string `json:"default_model"`
+		Cooldown     struct {
+			PlanCredit  string `json:"plan_credit"`   // 1005 冷却，默认 "12h"
+			SoftRate    string `json:"soft_rate"`     // 429 冷却，默认 "60s"
+			ErrThresh   int    `json:"err_threshold"` // 连续错误阈值，默认 3
+			ErrCooldown string `json:"err_cooldown"`  // 错误冷却，默认 "10m"
+		} `json:"cooldown"`
+		Schedule struct {
+			CheckinHour  int   `json:"checkin_hour"`  // 每日签到时点，默认 9
+			RefreshHours []int `json:"refresh_hours"` // token 预刷新时点，默认 [3]
+		} `json:"schedule"`
+		Upstream struct {
+			TimeoutSeconds int `json:"timeout_seconds"` // 默认 120
+		} `json:"upstream"`
+
+		// 解析后的 duration。
+		PlanCreditDur  time.Duration `json:"-"`
+		SoftRateDur    time.Duration `json:"-"`
+		ErrCooldownDur time.Duration `json:"-"`
+	} `json:"trae"`
+
+	Zcode struct {
+		// Enabled ZCode（Z.ai GLM Coding Plan）上游开关，缺省 true。关闭后
+		// /v1/models 不列 zcode 模型、chat 不分流到 zcode 上游，/zcode/ 面板 404。
+		Enabled bool `json:"enabled"`
+		// DBPath zcode 账号 SQLite 库路径（modernc 纯 Go 驱动，无 CGO）。
+		DBPath string `json:"db_path"`
+		// ProxyFile zcode 代理种子文件（首次启动导入后由面板管理）。
+		ProxyFile string `json:"proxy_file"`
+		// AccountMaxTry 单次请求最多尝试的 zcode 账号数，默认 8。
+		AccountMaxTry int `json:"account_max_try"`
+		// CaptchaOff 关闭验证码求解（CAPTCHA_MODE=off）；开启后 3007 时报错
+		// 而不是起 node 求解。默认 false（需要容器内有 node）。
+		CaptchaOff bool `json:"captcha_off"`
+	} `json:"zcode"`
+
+	Autoclaw struct {
+		// Enabled AutoClaw（智谱澳龙，autoclaw.z.ai 云端沙箱）上游开关，缺省
+		// true。关闭后 /v1/models 不列 autoclaw 模型、chat 不分流、/autoclaw/ 不挂载。
+		Enabled bool `json:"enabled"`
+		// BaseURL 独立部署的 autoclaw2api 服务基址（Python 容器，端口 7865）。
+		// 账号池/状态机/签到由其自治，本服务只做路由分流与模型合并。
+		BaseURL string `json:"base_url"`
+		// APIKey autoclaw2api 的 api_key（建议与主网关统一密钥一致）。
+		APIKey string `json:"api_key"`
+	} `json:"autoclaw"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
@@ -293,6 +357,29 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// Trae CN 上游缺省启用（无账号时不影响主链路；显式 false 可整体关闭）。
+	c.Trae.Enabled = true
+	c.Trae.AuthDir = "./trae-auths"
+	c.Trae.StateFile = "./data/trae-state.json"
+	c.Trae.CallbackPort = "18080"
+	c.Trae.DefaultModel = "glm-5.2"
+	c.Trae.Cooldown.PlanCredit = "12h"
+	c.Trae.Cooldown.SoftRate = "60s"
+	c.Trae.Cooldown.ErrThresh = 3
+	c.Trae.Cooldown.ErrCooldown = "10m"
+	c.Trae.Schedule.CheckinHour = 9
+	c.Trae.Schedule.RefreshHours = []int{3}
+	c.Trae.Upstream.TimeoutSeconds = 120
+	// ZCode（Z.ai GLM Coding Plan）上游缺省启用（无账号时不影响主链路）。
+	// 聊天请求周期性过阿里云验证码 → 需要 node 在 PATH（Docker 镜像内置）。
+	c.Zcode.Enabled = true
+	c.Zcode.DBPath = "./data/zcode-accounts.db"
+	c.Zcode.ProxyFile = "./zcode-data/proxy.txt"
+	c.Zcode.AccountMaxTry = 8
+	// AutoClaw 上游缺省启用（服务不可达时自动降级，不影响主链路）。
+	c.Autoclaw.Enabled = true
+	c.Autoclaw.BaseURL = "http://autoclaw2api:7865"
+	c.Autoclaw.APIKey = ""
 	return c
 }
 
@@ -449,6 +536,49 @@ func applyEnv(c *Config) {
 			c.Pool.PreferExpiring = b
 		}
 	}
+	// Trae 段 env 覆盖（与独立版 TW2A_* 命名兼容，便于从旧部署迁移）。
+	if v := os.Getenv("TW2A_API_KEY"); v != "" {
+		c.Trae.APIKey = v
+	}
+	if v := os.Getenv("TW2A_AUTH_DIR"); v != "" {
+		c.Trae.AuthDir = v
+	}
+	if v := os.Getenv("TW2A_STATE_FILE"); v != "" {
+		c.Trae.StateFile = v
+	}
+	if v := os.Getenv("TW2A_CALLBACK_PORT"); v != "" {
+		c.Trae.CallbackPort = v
+	}
+	if v := os.Getenv("TW2A_CALLBACK_HOST"); v != "" {
+		c.Trae.CallbackHost = v
+	}
+	if v := os.Getenv("TW2A_DEFAULT_MODEL"); v != "" {
+		c.Trae.DefaultModel = v
+	}
+	// Zcode 段 env 覆盖。
+	if v := os.Getenv("ZC_DB_PATH"); v != "" {
+		c.Zcode.DBPath = v
+	}
+	if v := os.Getenv("ZC_PROXY_FILE"); v != "" {
+		c.Zcode.ProxyFile = v
+	}
+	if v := os.Getenv("ZC_ACCOUNT_MAX_TRY"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			c.Zcode.AccountMaxTry = n
+		}
+	}
+	if v := os.Getenv("ZC_CAPTCHA_OFF"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Zcode.CaptchaOff = b
+		}
+	}
+	// AutoClaw 段 env 覆盖。
+	if v := os.Getenv("AC_BASE_URL"); v != "" {
+		c.Autoclaw.BaseURL = v
+	}
+	if v := os.Getenv("AC_API_KEY"); v != "" {
+		c.Autoclaw.APIKey = v
+	}
 }
 
 func (c *Config) normalize() error {
@@ -560,6 +690,52 @@ func (c *Config) normalize() error {
 	}
 	if c.Upstream.IdleTimeoutSeconds <= 0 {
 		c.Upstream.IdleTimeoutSeconds = 300
+	}
+	// Trae 段 normalize：duration 解析 + 缺省回落（与独立版 trae2api-web 同一套默认值）。
+	if c.Trae.Cooldown.PlanCredit == "" {
+		c.Trae.Cooldown.PlanCredit = "12h"
+	}
+	if c.Trae.Cooldown.SoftRate == "" {
+		c.Trae.Cooldown.SoftRate = "60s"
+	}
+	if c.Trae.Cooldown.ErrCooldown == "" {
+		c.Trae.Cooldown.ErrCooldown = "10m"
+	}
+	if c.Trae.Cooldown.ErrThresh <= 0 {
+		c.Trae.Cooldown.ErrThresh = 3
+	}
+	if c.Trae.PlanCreditDur, err = time.ParseDuration(c.Trae.Cooldown.PlanCredit); err != nil {
+		return fmt.Errorf("trae.cooldown.plan_credit: %w", err)
+	}
+	if c.Trae.SoftRateDur, err = time.ParseDuration(c.Trae.Cooldown.SoftRate); err != nil {
+		return fmt.Errorf("trae.cooldown.soft_rate: %w", err)
+	}
+	if c.Trae.ErrCooldownDur, err = time.ParseDuration(c.Trae.Cooldown.ErrCooldown); err != nil {
+		return fmt.Errorf("trae.cooldown.err_cooldown: %w", err)
+	}
+	if c.Trae.Schedule.CheckinHour <= 0 {
+		c.Trae.Schedule.CheckinHour = 9
+	}
+	if len(c.Trae.Schedule.RefreshHours) == 0 {
+		c.Trae.Schedule.RefreshHours = []int{3}
+	}
+	if c.Trae.Upstream.TimeoutSeconds <= 0 {
+		c.Trae.Upstream.TimeoutSeconds = 120
+	}
+	if c.Trae.DefaultModel == "" {
+		c.Trae.DefaultModel = "glm-5.2"
+	}
+	if c.Trae.AuthDir == "" {
+		c.Trae.AuthDir = "./trae-auths"
+	}
+	if c.Trae.StateFile == "" {
+		c.Trae.StateFile = "./data/trae-state.json"
+	}
+	if c.Trae.CallbackPort == "" {
+		c.Trae.CallbackPort = "18080"
+	}
+	if c.Trae.CallbackHost == "" {
+		c.Trae.CallbackHost = "127.0.0.1"
 	}
 	if !strings.HasPrefix(c.Listen, ":") && !strings.Contains(c.Listen, ":") {
 		c.Listen = ":" + c.Listen

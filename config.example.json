@@ -20,12 +20,26 @@
     "soft_rate_max": "2h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "growth_hours": [1],
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
-    "blackcat_hours": [23],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "growth_hours": [
+      1
+    ],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
+    "blackcat_hours": [
+      23
+    ],
     "checkin_enabled": true,
     "growth_enabled": true,
     "travel_enabled": true,
@@ -84,5 +98,35 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "trae": {
+    "enabled": true,
+    "api_key": "",
+    "auth_dir": "./trae-auths",
+    "state_file": "./data/trae-state.json",
+    "callback_port": "18080",
+    "default_model": "glm-5.2",
+    "cooldown": {
+      "plan_credit": "12h",
+      "soft_rate": "60s",
+      "err_threshold": 3,
+      "err_cooldown": "10m"
+    },
+    "schedule": {
+      "checkin_hour": 9,
+      "refresh_hours": [
+        3
+      ]
+    },
+    "upstream": {
+      "timeout_seconds": 120
+    }
+  },
+  "zcode": {
+    "enabled": true,
+    "db_path": "./data/zcode-accounts.db",
+    "proxy_file": "./zcode-data/proxy.txt",
+    "account_max_try": 8,
+    "captcha_off": false
   }
 }

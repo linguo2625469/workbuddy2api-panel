@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WorkBuddy2API · 控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3.5' fill='%234b6bfb'/%3E%3Ctext x='8' y='11.5' font-size='9' font-weight='700' fill='white' text-anchor='middle' font-family='sans-serif'%3EA%3C/text%3E%3C/svg%3E">
+<title>AgentPoints · Console</title>
 <style>
 /* ── 设计令牌：明暗两套独立色板 ─────────────────────────────────────────
    冷石墨基调（仪表盘语言，非营销页）：底色分层 + 单一靛蓝强调（仅交互），
@@ -592,13 +593,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 <div class="shell">
   <nav class="nav">
     <div class="brand">
-      <div class="name">WorkBuddy2API</div>
-      <div class="sub" id="navSub">控制台</div>
+      <div class="name">AgentPoints</div>
+      <div class="sub" id="navSub">AI Agent Points Auto-Farming</div>
     </div>
     <ul>
       <li><a href="#accounts" data-view="accounts" class="on">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
-        账号池</a></li>
+        WorkBuddy 账号</a></li>
+      <li><a href="#trae" data-view="trae">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.2" y="2.2" width="11.6" height="11.6" rx="2.6"/><path d="M5.4 5.8h5.2M8 5.8v4.8"/></svg>
+        Trae 账号</a></li>
+      <li><a href="#zcode" data-view="zcode">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="5.8"/><path d="M6 6.2l-1.8 1.8L6 9.8M10 6.2l1.8 1.8L10 9.8"/></svg>
+        ZCode 账号</a></li>
+      <li><a href="#autoclaw" data-view="autoclaw">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2.2" y="2.2" width="11.6" height="11.6" rx="2.6"/><circle cx="5.8" cy="6.8" r="1"/><circle cx="10.2" cy="6.8" r="1"/><path d="M5.5 10.5c1.5 1.2 3.5 1.2 5 0"/></svg>
+        AutoClaw 账号</a></li>
       <li><a href="#usage" data-view="usage">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         用量</a></li>
@@ -702,6 +712,104 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </section>
 
+    <!-- Trae 账号（Trae CN 上游，与主账号池独立） -->
+    <section class="view" id="view-trae" hidden>
+      <div class="box">
+        <header>
+          <h3>定时任务</h3>
+          <span class="grow"></span>
+          <span class="note" id="traeSchedNote"></span>
+          <button class="xs" id="btnTraeRefreshTokens">立即刷新 Token</button>
+          <button class="xs primary" id="btnTraeCheckin">立即签到</button>
+        </header>
+        <div class="note" id="traeSchedInfo" style="padding:8px 14px 10px">—</div>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><div class="v" id="tTotal">-</div><div class="k">账号总数</div></div>
+        <div class="stat good"><div class="v" id="tHealthy">-</div><div class="k">可用</div></div>
+        <div class="stat warn"><div class="v" id="tCooling">-</div><div class="k">冷却中</div></div>
+        <div class="stat bad"><div class="v" id="tDisabled">-</div><div class="k">已禁用</div></div>
+        <div class="stat"><div class="v" id="tCredits">-</div><div class="k">积分剩余</div></div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>Trae CN 账号池</h3>
+          <span class="grow"></span>
+          <span class="note" id="traeNote"></span>
+        </header>
+        <div class="tbl-wrap">
+        <table class="acc">
+          <thead><tr>
+            <th class="mark" aria-hidden="true"></th>
+            <th>账号</th><th>状态</th><th>积分</th><th>Token 到期</th><th class="c-acts"></th>
+          </tr></thead>
+          <tbody id="traeBody"></tbody>
+        </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ZCode 账号（Z.ai GLM Coding Plan 上游，与主账号池独立） -->
+    <section class="view" id="view-zcode" hidden>
+      <div class="stats">
+        <div class="stat"><div class="v" id="zTotal">-</div><div class="k">账号总数</div></div>
+        <div class="stat good"><div class="v" id="zHealthy">-</div><div class="k">可用</div></div>
+        <div class="stat warn"><div class="v" id="zCooling">-</div><div class="k">冷却中</div></div>
+        <div class="stat bad"><div class="v" id="zDisabled">-</div><div class="k">已停用</div></div>
+        <div class="stat"><div class="v" id="zModels">-</div><div class="k">模型数</div></div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>ZCode（Z.ai）账号池</h3>
+          <span class="grow"></span>
+          <span class="note" id="zcodeNote"></span>
+          <button class="xs" id="btnZcodeRefreshQuota">刷新配额</button>
+        </header>
+        <div class="tbl-wrap">
+        <table class="acc">
+          <thead><tr>
+            <th class="mark" aria-hidden="true"></th>
+            <th>账号</th><th>状态</th><th>套餐</th><th>额度</th><th class="c-acts"></th>
+          </tr></thead>
+          <tbody id="zcodeBody"></tbody>
+        </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- AutoClaw（智谱澳龙）账号 -->
+    <section class="view" id="view-autoclaw" hidden>
+      <div class="stats">
+        <div class="stat"><div class="v" id="acTotal">-</div><div class="k">账号总数</div></div>
+        <div class="stat good"><div class="v" id="acHealthy">-</div><div class="k">可用</div></div>
+        <div class="stat warn"><div class="v" id="acCooling">-</div><div class="k">冷却中</div></div>
+        <div class="stat bad"><div class="v" id="acDisabled">-</div><div class="k">已停用</div></div>
+        <div class="stat"><div class="v" id="acCredits">-</div><div class="k">总积分</div></div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>AutoClaw（澳龙）账号池</h3>
+          <span class="grow"></span>
+          <span class="note" id="autoclawNote"></span>
+          <button class="xs" id="btnAutoClawRefresh">刷新积分</button>
+          <button class="xs" id="btnAutoClawCheckin">一键签到</button>
+        </header>
+        <div class="tbl-wrap">
+        <table class="acc">
+          <thead><tr>
+            <th class="mark" aria-hidden="true"></th>
+            <th>账号</th><th>区</th><th>状态</th><th>积分</th><th class="c-acts"></th>
+          </tr></thead>
+          <tbody id="autoclawBody"></tbody>
+        </table>
+        </div>
+      </div>
+    </section>
+
     <!-- 任务中心 -->
     <section class="view" id="view-taskscenter" hidden>
       <div class="box">
@@ -748,6 +856,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <option value="">全部域</option>
             <option value="cn">国内版 CN</option>
             <option value="global">国际版 Global</option>
+            <option value="trae">Trae CN</option>
+            <option value="zcode">ZCode (Z.AI)</option>
           </select>
           <select id="mdCap" aria-label="按能力筛选">
             <option value="">全部能力</option>
@@ -800,6 +910,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note">按批次到期日聚合，颜色区分账号</span>
         </header>
         <div class="pad"><div id="pkExpiry"></div></div>
+      </div>
+
+      <div class="box" id="pkTraeBox" hidden>
+        <header>
+          <h3>Trae CN 账号积分</h3>
+          <span class="grow"></span>
+          <span class="note" id="pkTraeNote">—</span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th class="mark" aria-hidden="true"></th>
+              <th>账号</th><th class="num">剩余 / 总额</th><th class="num">已用</th>
+              <th class="num">积分包</th><th>今日签到</th>
+            </tr></thead>
+            <tbody id="pkTraeBody"></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="box">
@@ -887,6 +1015,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <table class="acc zebra">
             <thead id="usCreditHead"></thead>
             <tbody id="usCreditBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box" id="usTraeBox" hidden>
+        <header>
+          <h3>Trae CN 用量</h3>
+          <span class="grow"></span>
+          <span class="note" id="usTraeNote">—</span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead><tr>
+              <th class="mark" aria-hidden="true"></th>
+              <th>账号</th><th class="num">请求</th><th class="num">失败</th>
+              <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th><th>日期</th>
+            </tr></thead>
+            <tbody id="usTraeBody"></tbody>
           </table>
         </div>
       </div>
@@ -1196,7 +1342,10 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <header>
       <h3>添加账号</h3>
       <div class="tabs" id="addTabs">
-        <button class="tab on" data-tab="login">浏览器登录</button>
+        <button class="tab on" data-tab="login">WorkBuddy 登录（含国际版）</button>
+        <button class="tab" data-tab="trae">Trae CN 登录</button>
+        <button class="tab" data-tab="zcode">ZCode (Z.AI) 登录</button>
+        <button class="tab" data-tab="autoclaw">AutoClaw 登录</button>
         <button class="tab" data-tab="import">导入 JSON</button>
       </div>
     </header>
@@ -1220,10 +1369,59 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div id="addDone" class="state ok" hidden></div>
         <div id="addErr" class="state err" hidden></div>
       </div>
+      <!-- Trae CN 登录 -->
+      <div id="addTabTrae" class="tab-panel" hidden>
+        <div class="hint" style="margin-bottom:10px">使用 Trae CN（国内版 trae.cn）账号登录。登录成功后自动导入 Trae 账号池，网关按模型名自动分流。</div>
+        <button class="primary" id="btnStartTrae">获取 Trae 登录链接</button>
+        <div id="traeLoad" class="state" hidden style="margin-top:10px"><span class="dots">正在获取授权链接</span></div>
+        <div id="traeReady" hidden style="margin-top:10px">
+          <div class="state">在浏览器打开以下链接并登录：</div>
+          <div class="url" id="traeUrl"></div>
+          <div class="state" id="traePoll"><span class="dots">等待授权完成，自动检测中</span></div>
+        </div>
+        <div id="traeDone" class="state ok" hidden style="margin-top:10px"></div>
+        <div id="traeErr" class="state err" hidden style="margin-top:10px"></div>
+      </div>
+      <!-- ZCode (Z.AI) 登录 -->
+      <div id="addTabZcode" class="tab-panel" hidden>
+        <div class="hint" style="margin-bottom:10px">使用 Z.ai（GLM Coding Plan）账号登录。登录成功后自动导入 ZCode 账号池（SQLite），网关按模型名自动分流（glm-5.3 等）。</div>
+        <button class="primary" id="btnStartZcode">获取 Z.AI 登录链接</button>
+        <div id="zcodeLoad" class="state" hidden style="margin-top:10px"><span class="dots">正在获取授权链接</span></div>
+        <div id="zcodeReady" hidden style="margin-top:10px">
+          <div class="state">在浏览器打开以下链接并登录：</div>
+          <div class="url" id="zcodeUrl"></div>
+          <div class="state" id="zcodePoll"><span class="dots">等待授权完成，自动检测中</span></div>
+        </div>
+        <div id="zcodeDone" class="state ok" hidden style="margin-top:10px"></div>
+        <div id="zcodeErr" class="state err" hidden style="margin-top:10px"></div>
+      </div>
+      <!-- AutoClaw 登录（国内手机号 + 短信验证码） -->
+      <div id="addTabAutoclaw" class="tab-panel" hidden>
+        <div class="hint" style="margin-bottom:10px">使用 AutoClaw（澳龙，autoclaw.z.ai）国内账号：手机号 + 短信验证码登录。登录成功后自动导入 AutoClaw 账号池；国际 OAuth 账号可在其控制台手工导入凭证文件。</div>
+        <div class="realm-row" style="margin-bottom:8px">
+          <input type="text" id="acPhone" placeholder="手机号" style="width:200px" autocomplete="tel">
+          <button class="xs" id="btnAcSendCode">发送验证码</button>
+        </div>
+        <div class="realm-row" style="margin-bottom:8px">
+          <input type="text" id="acCode" placeholder="短信验证码" style="width:200px" inputmode="numeric">
+          <button class="primary" id="btnAcLogin">登录并导入</button>
+        </div>
+        <div id="acDone" class="state ok" hidden style="margin-top:10px"></div>
+        <div id="acErr" class="state err" hidden style="margin-top:10px"></div>
+      </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
-        <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+        <div class="realm-row" style="margin-bottom:8px">
+          <span style="color:var(--ink-2);font-size:12.5px">目标池：</span>
+          <label style="margin-right:12px;font-size:12.5px"><input type="radio" name="impPool" value="workbuddy" checked> WorkBuddy</label>
+          <label style="margin-right:12px;font-size:12.5px"><input type="radio" name="impPool" value="trae"> Trae CN</label>
+          <label style="font-size:12.5px"><input type="radio" name="impPool" value="zcode"> ZCode (Z.AI)</label>
+        </div>
+        <div class="hint" style="margin-bottom:8px" id="impHint">选择 cockpit tools 导出的 JSON 文件，批量导入 WorkBuddy 账号。文件需为账号数组格式。</div>
+        <div class="realm-row" style="margin-bottom:8px">
+          <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+          <button class="xs" id="btnImpTemplate">下载模板</button>
+        </div>
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>

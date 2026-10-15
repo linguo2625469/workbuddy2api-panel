@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zcode2Api · Account Pool</title>
+<link rel="stylesheet" href="app.css?v=1.0.6">
+</head>
+<body>
+
+<div id="app" style="display:none">
+<header class="admin-header"><div class="admin-header-inner">
+    <div class="admin-brand"><span class="brand-word">Zcode<b>2</b>Api</span></div>
+    <nav class="admin-nav">
+      <a class="admin-nav-link active" href="./">Account Pool</a>
+      <a class="admin-nav-link " href="proxies.html">Proxies</a>
+      <a class="admin-nav-link " href="settings.html">Settings</a>
+    </nav>
+    <div class="admin-header-right">
+      <a class="admin-header-icon-btn" href="https://github.com/D3-vin/Zcode2Api" target="_blank" title="GitHub"><svg viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg></a>
+      <a class="admin-header-icon-btn" href="https://t.me/D3_vin" target="_blank" title="Telegram"><svg viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></a>
+      <span class="admin-header-version" id="hdr-version">v1.0.0</span>
+      <button class="admin-header-icon-btn" title="Log out" onclick="doLogout()"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button>
+    </div>
+  </div></header>
+
+<main class="admin-main">
+
+  <div class="page-hd">
+    <div>
+      <div class="page-title">Account Pool</div>
+      <div class="page-sub">Multi-account rotation · automatic failover on quota · device-warmed identities</div>
+    </div>
+    <div class="page-actions">
+      <button class="page-action-btn" onclick="doImport()"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Import</button>
+      <button class="page-action-btn" onclick="doExport()"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Export</button>
+      <button class="page-action-btn" title="Claim all: preview billing and claim every plan the origin offers, per account" onclick="claimAll(this)"><svg viewBox="0 0 24 24"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg>Claim all</button>
+      <button class="page-action-btn" onclick="refreshAll(this)"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>Refresh quotas</button>
+      <button class="page-action-btn page-action-btn-primary" onclick="openModal('modal-add')"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add</button>
+    </div>
+  </div>
+
+  <div class="section-head"><div class="section-title">Account overview</div></div>
+  <div class="stat-grid">
+    <div class="stat-cell"><div class="stat-top"><span class="stat-label">Total accounts</span><span class="stat-icon"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></span></div><div class="stat-num" id="s-total">—</div></div>
+    <div class="stat-cell"><div class="stat-top"><span class="stat-label">Healthy</span><span class="stat-icon" style="color:var(--mint)"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg></span></div><div class="stat-num" id="s-active" style="color:var(--mint)">—</div></div>
+    <div class="stat-cell"><div class="stat-top"><span class="stat-label">Quota exhausted</span><span class="stat-icon" style="color:var(--purple)"><svg viewBox="0 0 24 24"><path d="M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86L7.86 2z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span></div><div class="stat-num" id="s-exhausted" style="color:var(--purple)">—</div></div>
+    <div class="stat-cell"><div class="stat-top"><span class="stat-label">Total quota (remaining)</span><span class="stat-icon" style="color:var(--mint)"><svg viewBox="0 0 24 24"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span></div><div class="stat-num" id="s-quota" style="color:var(--mint)">—</div></div>
+  </div>
+
+  <div class="section-head"><div class="section-title">Account details</div><span class="count-badge updated-badge" id="updated-at">Updated at --:--:--</span></div>
+  <div class="filter-bar" id="acct-filters"></div>
+  <div class="acct-scroll"><div class="acct-table" id="acct-list"><div class="empty-state">loading…</div></div></div>
+
+</main>
+</div>
+
+<!-- Add account modal -->
+<div class="modal-overlay" id="modal-add">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('modal-add');resetAdd()">✕</button>
+    <div class="modal-title">Add account</div>
+    <div class="modal-sub">Sign in via OAuth or paste credentials, one per line.</div>
+    <div class="filter-bar" style="margin-top:16px">
+      <button class="filter-chip active" id="tab-login" onclick="addTab('login')">OAuth login</button>
+      <button class="filter-chip" id="tab-paste" onclick="addTab('paste')">Paste credentials</button>
+    </div>
+    <div class="dialog-body" id="add-pane-login">
+      <div class="oauth-note">Z.AI only allows the official ZCode callback URL, so you need to copy the browser URL once after the login completes; no username or password is required.</div>
+      <button class="dialog-btn-primary finish" id="btn-start-login" onclick="startLogin()">Start login</button>
+      <div id="login-steps" style="display:none">
+        <div>
+          <span class="dialog-label">1. Open the authorization page and complete the Z.AI login:</span>
+          <div style="display:flex;gap:8px;align-items:center">
+            <input class="input" id="login-url" readonly value="" style="font-family:var(--mono);font-size:11px;flex:1 1 auto;min-width:0">
+            <button class="dialog-btn" style="flex:0 0 auto" onclick="copyLoginUrl()">Copy</button>
+            <button class="dialog-btn-dark" style="flex:0 0 auto" onclick="openLoginUrl()">Open</button>
+          </div>
+        </div>
+        <div class="dialog-help"><span class="badge badge-cooling">● Waiting for authorization…</span> <span id="login-count">4:57</span> — the server polls automatically; on success the JWT lands in the pool and gets warmed.</div>
+      </div>
+      <div class="dialog-help" id="login-status"></div>
+    </div>
+    <div class="dialog-body" id="add-pane-paste" style="display:none">
+      <div><span class="dialog-label">Tokens</span>
+        <textarea class="input" id="paste-tokens" rows="6" placeholder="One Coding Plan JWT per line — existing ones are skipped automatically"></textarea></div>
+      <div><span class="dialog-label">Egress line</span>
+        <select class="input" id="paste-egress"><option value="pool" selected>Pool — random from all lines</option></select></div>
+      <div class="dialog-help">Bulk from file is served by env (ZCODE_KEYS=tokens.txt) at startup — here paste is for quick additions.</div>
+    </div>
+    <div class="dialog-actions">
+      <button class="dialog-btn" onclick="closeModal('modal-add');resetAdd()">Cancel</button>
+      <button class="dialog-btn-primary" id="btn-add-footer" style="display:none" onclick="doPasteAdd()">Add</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit account modal -->
+<div class="modal-overlay" id="modal-edit">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('modal-edit')">✕</button>
+    <div class="modal-title">Edit account</div>
+    <div class="modal-sub">Change the name, credentials, egress line or disable specific models.</div>
+    <div class="dialog-body">
+      <div><span class="dialog-label">Name</span><input class="input" id="edit-name"></div>
+      <div><span class="dialog-label">Token</span><input class="input" id="edit-token" placeholder="Leave empty to keep unchanged"></div>
+      <div><span class="dialog-label">Egress line</span><select class="input" id="edit-egress"></select></div>
+      <div><span class="dialog-label">Disabled models</span>
+        <div class="checks" id="edit-disabled"></div>
+        <div class="dialog-help" style="margin-top:6px">Once checked, this account is excluded from dispatching for that model.</div></div>
+    </div>
+    <div class="dialog-actions">
+      <button class="dialog-btn" onclick="closeModal('modal-edit')">Cancel</button>
+      <button class="dialog-btn-primary" onclick="saveEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="import-file" accept=".json" style="display:none" onchange="onImportFile(this)">
+<div class="toast-container" id="toasts"></div>
+
+<script src="app.js?v=1.0.6"></script>
+<script>
+const PAGE = 'accounts';
+let ACCOUNTS = [], PROFILES = [], EDIT_ID = 0, curFilter = 'all';
+
+function statusOf(a) {
+  if (a.status) return a.status; // revoked / expired / disabled
+  if (a.cooling_until && a.cooling_until > Date.now() / 1000) return 'cooling';
+  const ents = a.entitlements || [];
+  if (ents.length && ents.every(e => (e.remaining || 0) <= 0)) return 'exhausted';
+  return a.active ? 'active' : 'standby';
+}
+function displayStatus(a) { return a.status === 'disabled' ? 'disabled' : statusOf(a); }
+
+function stats() {
+  let total = ACCOUNTS.length, healthy = 0, exhausted = 0, rem = 0;
+  for (const a of ACCOUNTS) {
+    const st = displayStatus(a);
+    if (st === 'active' || st === 'standby' || st === 'cooling') healthy++;
+    if (st === 'exhausted') exhausted++;
+    for (const e of (a.entitlements || [])) rem += (e.remaining || 0);
+  }
+  document.getElementById('s-total').textContent = total;
+  document.getElementById('s-active').textContent = healthy;
+  document.getElementById('s-exhausted').textContent = exhausted;
+  document.getElementById('s-quota').textContent = fmtNum(rem);
+}
+
+function renderFilters() {
+  const counts = {};
+  for (const a of ACCOUNTS) { const s = displayStatus(a); counts[s] = (counts[s] || 0) + 1; }
+  const cats = ['all', 'active', 'standby', 'cooling', 'exhausted', 'revoked', 'expired', 'disabled'];
+  document.getElementById('acct-filters').innerHTML = cats.map(c => {
+    const n = c === 'all' ? ACCOUNTS.length : (counts[c] || 0);
+    return `<button class="filter-chip ${curFilter === c ? 'active' : ''}" onclick="setFilter('${c}',this)">${c[0].toUpperCase() + c.slice(1)} <b>${n}</b></button>`;
+  }).join('');
+}
+
+function setFilter(f, btn) {
+  curFilter = f;
+  document.querySelectorAll('#acct-filters .filter-chip').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  renderRows();
+}
+
+function renderRows() {
+  const el = document.getElementById('acct-list');
+  const list = ACCOUNTS.filter(a => curFilter === 'all' || displayStatus(a) === curFilter);
+  if (!list.length) { el.innerHTML = '<div class="empty-state">No accounts in this view</div>'; return; }
+  el.innerHTML = '<div class="acct-head"><span>Credential / account</span><span>Status</span><span title="3 strikes (final 3012) → 30m cooldown; a clean 200 resets">Strikes</span><span>Quota</span><span class="th-actions">Actions</span></div>' +
+    list.map(a => {
+      const st = displayStatus(a);
+      const ent = (a.entitlements || []);
+      const quota = ent.length ? '<div class="quota-rows">' + ent.map(e => {
+        const pct = e.limit ? Math.round((e.remaining || 0) / e.limit * 100) : 0;
+        const cls = pct <= 0 ? 'zero' : (pct < 15 ? 'low' : '');
+        return `<div class="quota-row"><div class="quota-row-name">${e.name}</div>
+          <div class="quota-row-track"><div class="quota-row-fill ${cls}" style="width:${pct}%"></div></div>
+          <div class="quota-row-val"><span><b>${fmtNum(e.remaining)}</b> / ${fmtNum(e.limit)}</span>${e.period_end ? '<span class="quota-row-exp">until ' + fmtDateQ(e.period_end) + '</span>' : ''}</div></div>`;
+      }).join('') + '</div>' : '<div class="quota-empty">No plan data</div>';
+      return `<div class="acct-row ${a.status ? 'is-disabled' : ''}" data-status="${st}">
+        <div class="cell cred">
+          <div style="min-width:0"><div class="acct-name"><span class="nm">${a.label || 'account #' + a.id}</span><span class="tier-b tier-plan">${a.plan || 'no plan'}</span></div>
+          <div class="cred-sub">${a.jwt} · JWT</div></div></div>
+        <div class="cell">${badge(st)}</div>
+        <div class="cell"><span class="cell-sub" style="font-family:var(--mono)">${a.risk_strikes || 0} / 3</span></div>
+        <div class="cell">${quota}</div>
+        <div class="cell acct-actions">
+          <button class="act-btn icon" title="Refresh quota" onclick="spinBtn(this);refreshOne(${a.id})"><svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+          <button class="act-btn icon" title="Claim every offered plan" onclick="spinBtn(this);claimOne(${a.id})"><svg viewBox="0 0 24 24"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/><line x1="12" y1="22" x2="12" y2="7"/><path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"/><path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></svg></button>
+          <button class="act-btn icon" title="Edit: name, token, egress line, disabled models" onclick="openEdit(${a.id})"><svg viewBox="0 0 24 24"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg></button>
+          <button class="act-btn icon danger" title="Delete account" onclick="delAccount(${a.id})"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          <label class="switch" title="Enable / disable"><input type="checkbox" ${a.status !== 'disabled' ? 'checked' : ''} onchange="toggleAccount(${a.id},this.checked)"><span class="switch-slider"></span></label>
+        </div>
+      </div>`;
+    }).join('');
+}
+function badge(s) { const m = { active:'Active', standby:'Standby', exhausted:'Exhausted', cooling:'Cooling', revoked:'Revoked', expired:'Expired', disabled:'Disabled' }; return `<span class="badge badge-${s}">${m[s] || s}</span>`; }
+
+async function claimAll(btn) { spinBtn(btn); toast('Claiming offered plans…', 'ok'); await post('api/accounts/claim-all', {}); await refreshAccounts(); toast('Claim finished', 'ok'); }
+async function claimOne(id) { toast('Claiming…', 'ok'); await post('api/accounts/claim-one', { id }); await refreshAccounts(); toast('Done', 'ok'); }
+async function refreshAccounts() {
+  try {
+    const d = await j('api/accounts');
+    console.log('[dash] accounts loaded:', (d.accounts || []).length);
+    ACCOUNTS = d.accounts || [];
+    stats(); renderFilters(); renderRows(); tickClock();
+  } catch (e) { console.error('[dash] refreshAccounts failed:', e); toast('Failed to load accounts: ' + e.message, 'err'); }
+}
+async function refreshOne(id) { await post('api/accounts/refresh', { id }); await refreshAccounts(); }
+async function refreshAll(btn) { if (btn) spinBtn(btn); await post('api/quota/refresh'); await refreshAccounts(); }
+async function toggleAccount(id, enabled) { await post('api/accounts/toggle', { id, enabled }); await refreshAccounts(); }
+async function delAccount(id) { if (!confirm('Delete this account?')) return; await post('api/accounts/remove', { id }); await refreshAccounts(); }
+function doExport() { j('api/accounts/export').then(d => {
+  const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'zcode-accounts.json'; a.click();
+}); }
+function doImport() { document.getElementById('import-file').click(); }
+async function onImportFile(input) {
+  const f = input.files && input.files[0];
+  input.value = '';
+  if (!f) return;
+  try {
+    const text = await f.text();
+    const parsed = JSON.parse(text);
+    const list = Array.isArray(parsed) ? parsed : (parsed.accounts || []);
+    if (!list.length) { toast('No accounts in file', 'err'); return; }
+    const d = await post('api/accounts/restore', { accounts: list });
+    toast('Imported ' + (d.added || 0) + ', skipped ' + (d.skipped || 0), 'ok');
+    await refreshAccounts();
+  } catch (e) {
+    console.error('[dash] import failed:', e);
+    toast('Import failed: ' + (e && e.message ? e.message : e), 'err');
+  }
+}
+
+/* add modal */
+function addTab(t) {
+  document.getElementById('tab-paste').classList.toggle('active', t === 'paste');
+  document.getElementById('tab-login').classList.toggle('active', t === 'login');
+  document.getElementById('add-pane-paste').style.display = t === 'paste' ? '' : 'none';
+  document.getElementById('add-pane-login').style.display = t === 'login' ? '' : 'none';
+  document.getElementById('btn-add-footer').style.display = t === 'paste' ? '' : 'none';
+}
+function resetAdd() {
+  addTab('login');
+  document.getElementById('btn-start-login').style.display = '';
+  document.getElementById('login-steps').style.display = 'none';
+  document.getElementById('login-url').value = '';
+  document.getElementById('login-status').textContent = '';
+  document.getElementById('paste-tokens').value = '';
+}
+let loginPoll = null, loginFlow = '';
+async function startLogin() {
+  document.getElementById('btn-start-login').style.display = 'none';
+  document.getElementById('login-steps').style.display = '';
+  const d = await post('api/login/start', {});
+  if (d.error) { document.getElementById('login-status').textContent = d.error; return; }
+  loginFlow = d.flow_id;
+  document.getElementById('login-url').value = d.authorize_url;
+  document.getElementById('login-status').textContent = 'Authorization link generated. Copy it into a browser and complete the Z.AI login…';
+  let left = 297;
+  document.getElementById('login-count').textContent = '4:57';
+  loginPoll = setInterval(async () => {
+    left--; const m = Math.floor(left / 60), s = left % 60;
+    document.getElementById('login-count').textContent = m + ':' + String(s).padStart(2, '0');
+    if (left <= 0) { clearInterval(loginPoll); return; }
+    const p = await j('api/login/poll/' + loginFlow);
+    if (p.status === 'ready') {
+      clearInterval(loginPoll);
+      document.getElementById('login-status').textContent = 'Account added: ' + (p.account || '') + (p.api_key ? ' (' + p.api_key + ')' : '');
+      toast('OAuth account added', 'ok'); await refreshAccounts();
+      setTimeout(() => closeModal('modal-add'), 1200);
+    } else if (p.status === 'failed') {
+      clearInterval(loginPoll);
+      document.getElementById('login-status').textContent = 'Failed: ' + (p.message || '');
+    } else if (p.status === 'expired') {
+      clearInterval(loginPoll);
+      document.getElementById('login-status').textContent = 'Flow expired — press Start login again.';
+    }
+  }, 2500);
+}
+function copyLoginUrl() { navigator.clipboard.writeText(document.getElementById('login-url').value); toast('Copied', 'ok'); }
+function openLoginUrl() { window.open(document.getElementById('login-url').value, '_blank'); }
+async function doPasteAdd() {
+  const tokens = document.getElementById('paste-tokens').value.trim();
+  if (!tokens) return;
+  const d = await post('api/accounts/add', { jwt: tokens });
+  if (d.error) { toast(d.error, 'err'); return; }
+  toast('Added ' + (d.added || 1) + ' account(s)', 'ok');
+  closeModal('modal-add'); resetAdd(); await refreshAccounts();
+}
+
+/* edit modal */
+function egressOf(a) {
+  for (const p of PROFILES) if (p.bound_to_account === a.id) return String(p.id);
+  return 'pool';
+}
+async function openEdit(id) {
+  EDIT_ID = id;
+  const a = ACCOUNTS.find(x => x.id === id); if (!a) return;
+  const pd = await j('api/proxies'); PROFILES = pd.profiles || [];
+  document.getElementById('edit-name').value = a.label || ('account #' + a.id);
+  document.getElementById('edit-token').value = '';
+  const sel = document.getElementById('edit-egress');
+  sel.innerHTML = '<option value="pool">Pool — random from all lines</option><option value="direct">Direct (no proxy)</option>' +
+    PROFILES.map(p => `<option value="${p.id}">${(p.name || p.url)}</option>`).join('');
+  sel.value = egressOf(a);
+  if (!sel.value) sel.value = 'pool';
+  const dm = new Set((a.disabled_models || '').split(',').filter(Boolean));
+  const models = new Set(['glm-5.3', 'glm-5.3-flash']);
+  for (const e of (a.entitlements || [])) if (e.name) models.add(String(e.name).toLowerCase());
+  document.getElementById('edit-disabled').innerHTML = [...models].map(m =>
+    `<label><input type="checkbox" value="${m}" ${dm.has(m) ? 'checked' : ''}> ${m}</label>`).join('');
+  openModal('modal-edit');
+}
+async function saveEdit() {
+  const disabled = [...document.querySelectorAll('#edit-disabled input:checked')].map(c => c.value);
+  const payload = {
+    id: EDIT_ID,
+    name: document.getElementById('edit-name').value.trim(),
+    token: document.getElementById('edit-token').value.trim(),
+    egress: document.getElementById('edit-egress').value,
+    disabled_models: disabled,
+  };
+  closeModal('modal-edit');
+  try {
+    await post('api/accounts/edit', payload);
+    toast('Account saved', 'ok');
+  } catch (e) {
+    console.error('[dash] saveEdit failed:', e);
+    toast('Save failed: ' + (e && e.message ? e.message : e), 'err');
+  }
+  await refreshAccounts();
+}
+
+function boot() { console.log('[dash] boot'); refreshAccounts(); }
+gate(boot);
+setInterval(function () { if (DASH_TOKEN && !document.hidden) refreshAccounts(); }, 5000);
+</script>
+</body>
+</html>

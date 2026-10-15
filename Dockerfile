@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.23-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+# 构建期拉 Go 依赖：goproxy.cn 国内镜像（构建容器不走宿主机代理）
+ENV GOPROXY=https://goproxy.cn,direct
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
@@ -10,11 +12,14 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/serve
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit
 
-FROM alpine:3.20
-# python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。
-RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
+# alpine 3.21：nodejs 22（zcode 验证码 solver 要求 happy-dom 20 深层 ESM 路径，
+# require(esm) 需 node >= 22；alpine 3.20 的 nodejs 20 会报 ERR_REQUIRE_ESM）。
+FROM alpine:3.21
+# python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体；
+# nodejs：zcode（Z.ai）上游的验证码求解器（happy-dom solver 需要 node 在 PATH）。
+RUN apk add --no-cache wget ca-certificates tzdata python3 bash nodejs \
  && adduser -D -u 10001 app \
- && mkdir -p /app/auths /app/data \
+ && mkdir -p /app/auths /app/data /app/zcode-data /app/trae-auths \
  && chown -R app:app /app
 WORKDIR /app
 # 脚本置入 + 去 CRLF（Windows 检出可能性）在切到 app 之前以 root 完成——

@@ -1,0 +1,12 @@
+{
+  "name": "zcode2api-captcha-solver",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Browserless Aliyun captcha solver (Node + happy-dom simulated browser environment, aligned with the zapi captcha-happy design)",
+  "type": "commonjs",
+  "main": "solver.js",
+  "dependencies": {
+    "happy-dom": "^20.14.0",
+    "undici": "^8.10.2"
+  }
+}

@@ -26,8 +26,16 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	traauth "github.com/linguo2625469/workbuddy2api-panel/internal/trae/auth"
+	trapool "github.com/linguo2625469/workbuddy2api-panel/internal/trae/pool"
+	trasched "github.com/linguo2625469/workbuddy2api-panel/internal/trae/scheduler"
+	traserver "github.com/linguo2625469/workbuddy2api-panel/internal/trae/server"
+	traup "github.com/linguo2625469/workbuddy2api-panel/internal/trae/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	zcconfig "github.com/linguo2625469/workbuddy2api-panel/internal/zcode/config"
+	zcgateway "github.com/linguo2625469/workbuddy2api-panel/internal/zcode/gateway"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/autoclaw"
 )
 
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
@@ -291,6 +299,129 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
+	// ---- Trae CN（traework）上游装配（config trae 段；显式 false 整体关闭）----
+	// 与 workbuddy 主链路完全独立：独立凭证目录/状态文件/调度器，共用同一 api_key
+	//（trae 内部自鉴权，Authorization 原样透传）。有账号时才启用 chat 分流与
+	// /v1/models 合并；/trae/ 恒挂载（0 账号时也要走网页登录导入）。
+	var traeHandler http.Handler
+	var traeChat http.Handler
+	var traeKnownModel func(string) bool
+	var traeExtraModels func() []map[string]any
+	var traeHealthy func() bool
+	var traeSched *trasched.Scheduler
+	if cfg.Trae.Enabled {
+		traeAuths, terr := traauth.LoadDir(cfg.Trae.AuthDir)
+		if terr != nil {
+			log.Fatalf("load trae auths: %v", terr)
+		}
+		log.Printf("loaded %d trae account(s) from %s", len(traeAuths), cfg.Trae.AuthDir)
+		tp := trapool.New(cfg.Trae.StateFile)
+		tp.SyncToDir(traeAuths)
+		tup := traup.New()
+		tup.HTTP.Timeout = time.Duration(cfg.Trae.Upstream.TimeoutSeconds) * time.Second
+		if tr, ok := tup.StreamHTTP.Transport.(*http.Transport); ok {
+			tr.ResponseHeaderTimeout = time.Duration(cfg.Trae.Upstream.TimeoutSeconds) * time.Second
+		}
+		traeSched = trasched.New(trasched.Config{
+			Pool:         tp,
+			Upstream:     tup,
+			CheckinHour:  cfg.Trae.Schedule.CheckinHour,
+			RefreshHours: cfg.Trae.Schedule.RefreshHours,
+			RefreshSkew:  24 * time.Hour,
+		})
+		th := traserver.NewHandler(traserver.Config{
+			Pool:         tp,
+			Upstream:     tup,
+			APIKey:       cfg.APIKey, // 统一鉴权：与主网关同一把 key
+			AuthDir:      cfg.Trae.AuthDir,
+			PlanCooldown: cfg.Trae.PlanCreditDur,
+			SoftCooldown: cfg.Trae.SoftRateDur,
+			ErrThreshold: cfg.Trae.Cooldown.ErrThresh,
+			ErrCooldown:  cfg.Trae.ErrCooldownDur,
+			DefaultModel: cfg.Trae.DefaultModel,
+			Sched:        traeSched, // 定时任务桥接：面板展示排程 + 手动签到/刷新
+			UsageFile:    filepath.Join(filepath.Dir(cfg.Trae.StateFile), "trae-usage.json"),
+		})
+		traeHandler = th // /trae/* 恒挂载（管理面 /trae/admin + 网页登录导入）
+		// 分流与模型合并按池内账号动态判定：账号经 /trae/admin 运行时导入后
+		// 立即生效，无需重启；0 账号时不分流、/v1/models 不列 trae 模型。
+		traeChat = th
+		traeKnownModel = func(m string) bool {
+			return len(tp.List()) > 0 && th.KnownModel(m)
+		}
+		traeExtraModels = func() []map[string]any {
+			if len(tp.List()) == 0 {
+				return nil
+			}
+			return th.ModelList()
+		}
+		// 跨池兜底判定：trae 池是否还有健康账号（全冷却/禁用时同名模型落 workbuddy）
+		traeHealthy = func() bool { return tp.HealthyCount() > 0 }
+	}
+
+	// ---- ZCode（Z.ai GLM Coding Plan）上游装配（config zcode 段）----
+	// 独立 SQLite 账号库 + 独立调度器，共用同一 api_key。聊天周期性过阿里云
+	// 验证码 → 需 node 在 PATH（Docker 镜像内置）；CAPTCHA off 可关闭。
+	// /zcode/ 恒挂载（dashboard + OAuth 登录导入）；有账号时才启用 chat 分流
+	// 与 /v1/models 合并。
+	var zcodeChat http.Handler
+	var zcodeKnownModel func(string) bool
+	var zcodeExtraModels func() []map[string]any
+	var zcodeHealthy func() bool
+	var zcodePanel http.Handler
+	if cfg.Zcode.Enabled {
+		zcconfig.AccountsDBPath = cfg.Zcode.DBPath
+		zcfg := zcconfig.Config{
+			Host:           "127.0.0.1",
+			Port:           "0",        // 不监听：路由由主网关提供
+			AuthToken:      cfg.APIKey, // 统一鉴权：与主网关同一把 key
+			GatewayKey:     cfg.APIKey,
+			ProxyFile:      cfg.Zcode.ProxyFile,
+			LoadSwaps:      4,
+			AccountMaxTry:  cfg.Zcode.AccountMaxTry,
+			BillingWorkers: 8,
+			CaptchaOff:     cfg.Zcode.CaptchaOff,
+			CaptchaTimeout: 40 * time.Second,
+			CaptchaRetries: 3,
+		}
+		zs, zerr := zcgateway.NewServer(zcfg)
+		if zerr != nil {
+			log.Fatalf("init zcode: %v", zerr)
+		}
+		go zs.Warm()                                  // 调度器 + 计费刷新（模型目录/配额后台拉取）
+		zcodePanel = zs.Handler()                     // /zcode/* 剥前缀挂载
+		zcodeChat = http.HandlerFunc(zs.DispatchChat) // 主链路命中 zcode 模型时转发
+		zcodeKnownModel = zs.KnownModel
+		zcodeExtraModels = func() []map[string]any {
+			if zs.AccountCount() == 0 { // 空池不列模型（与 trae 行为一致）
+				return nil
+			}
+			return zs.ModelListJSON()
+		}
+		zcodeHealthy = func() bool { return zs.HealthyCount() > 0 }
+		log.Printf("zcode upstream enabled (db=%s, healthy=%d)", cfg.Zcode.DBPath, zs.HealthyCount())
+	}
+
+	// ---- AutoClaw（智谱澳龙云端沙箱）桥接装配（config autoclaw 段）----
+	// 账号池/状态机/签到由独立部署的 autoclaw2api（Python 容器，7865）自治；
+	// 本服务只做路由分流、模型合并与 /autoclaw/ 面板反代。服务不可达时自动
+	// 降级（Healthy=false → 同名模型兜底回主链路），不影响主服务启动。
+	var autoclawChat http.Handler
+	var autoclawKnownModel func(string) bool
+	var autoclawExtraModels func() []map[string]any
+	var autoclawHealthy func() bool
+	var autoclawPanel http.Handler
+	if cfg.Autoclaw.Enabled && cfg.Autoclaw.BaseURL != "" {
+		ac := autoclaw.New(cfg.Autoclaw.BaseURL, cfg.Autoclaw.APIKey)
+		cache := autoclaw.NewKnownCache()
+		autoclawPanel = ac.Proxy() // /autoclaw/* 整站反代（含其 console）
+		autoclawChat = ac.Proxy()
+		autoclawKnownModel = func(m string) bool { return ac.KnownModel(m, cache) }
+		autoclawExtraModels = func() []map[string]any { return ac.Models() }
+		autoclawHealthy = func() bool { return ac.Healthy() }
+		log.Printf("autoclaw bridge enabled (base=%s)", cfg.Autoclaw.BaseURL)
+	}
+
 	h := server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
@@ -309,7 +440,22 @@ func main() {
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
-		GlobalEnabled: cfg.Global.Enabled,
+		GlobalEnabled:    cfg.Global.Enabled,
+		Trae:             traeHandler,
+		TraeChat:         traeChat,
+		TraeKnownModel:   traeKnownModel,
+		TraeExtraModels:  traeExtraModels,
+		TraeHealthy:      traeHealthy,
+		ZcodeChat:        zcodeChat,
+		ZcodeKnownModel:  zcodeKnownModel,
+		ZcodeExtraModels: zcodeExtraModels,
+		ZcodeHealthy:     zcodeHealthy,
+		ZcodePanel:       zcodePanel,
+		AutoclawChat:        autoclawChat,
+		AutoclawKnownModel:  autoclawKnownModel,
+		AutoclawExtraModels: autoclawExtraModels,
+		AutoclawHealthy:     autoclawHealthy,
+		AutoclawPanel:       autoclawPanel,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -324,6 +470,32 @@ func main() {
 	// 模型归零；倍率表当时尚未建立）。
 	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
 	go warmModelRates(ctx, up, p)
+
+	// trae 调度器 + 网页登录回调 server（127.0.0.1:callback_port，仅 /authorize）。
+	if traeSched != nil {
+		go traeSched.Run(ctx)
+		log.Printf("trae 调度器已启动：签到 %d 点 / token 预刷新 %v", cfg.Trae.Schedule.CheckinHour, cfg.Trae.Schedule.RefreshHours)
+		if cfg.Trae.CallbackPort != "" && cfg.Trae.CallbackPort != "0" && traeHandler != nil {
+			cbSrv := &http.Server{
+				Addr:              cfg.Trae.CallbackHost + ":" + cfg.Trae.CallbackPort,
+				Handler:           traeHandler,
+				ReadHeaderTimeout: 30 * time.Second,
+			}
+			go func() {
+				<-ctx.Done()
+				sc, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				_ = cbSrv.Shutdown(sc)
+			}()
+			go func() {
+				log.Printf("trae callback server on %s:%s (TRAE login /authorize)", cfg.Trae.CallbackHost, cfg.Trae.CallbackPort)
+				if err := cbSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					// 端口被占用（旧实例）不致命：面板登录降级为手动粘贴回调链接。
+					log.Printf("trae callback server (:%s) failed: %v — web 登录降级为手动粘贴回调链接", cfg.Trae.CallbackPort, err)
+				}
+			}()
+		}
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
