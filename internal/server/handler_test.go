@@ -444,6 +444,45 @@ func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 	}
 }
 
+// TestApplyErrorPolicyUpstreamQueueFullNoPenalty 锚定 6021 queue.full 的处置：**零动作**。
+//
+// 回归背景（2026-10-15 现场）：6021 此前落 ErrSoftRate，触发 CooldownSoftRate 把账号
+// 停 600s 起；同域账号全部冷却后池子进入 pickEarliestExpiryLocked 兜底，主动把冷却号
+// 再送上游；兜底那一跳再撞 6021 又调 CooldownSoftRate **续订** 600s——两者互相喂，
+// 冷却永不自然到期，一次几秒的上游排队被放大成整段时间每个请求都 429
+//（10:54–11:04、11:07–11:17 两段，当日客户端可见 429 共 35 次）。
+//
+// 断言连调 3 次后账号依然不冷却、soft_streak 不推进：若误走 NoteError，
+// breaker_threshold 默认 3 会熔断，同样会体现在 Cooling 上，故一并覆盖。
+func TestApplyErrorPolicyUpstreamQueueFullNoPenalty(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
+
+	const body = `{"code":6021,"msg":"queue.full.title","requestId":"341738971737c911985e5b9e67a4eceb"}`
+	for i := 1; i <= 3; i++ {
+		h.applyErrorPolicy("u1", upstream.ErrUpstreamQueueFull, body, "glm-5.2", nil)
+		st, _ := p.Status("u1")
+		if st.Cooling {
+			t.Fatalf("call %d: 队列满不得冷却账号（上游容量信号非账号故障）: %+v", i, st)
+		}
+		if st.SoftStreak != 0 {
+			t.Errorf("call %d: 队列满不得推进 soft_streak, got %d", i, st.SoftStreak)
+		}
+	}
+}
+
+// TestClassifyQueueFullIsNotSoftRate 端到端锚点：同一个 429 信封里，带 6021 的判
+// upstream_queue_full、不带的仍判 soft_rate——保证补丁没有把普通限流一并放行。
+func TestClassifyQueueFullIsNotSoftRate(t *testing.T) {
+	if got := upstream.Classify(429, `{"code":6021,"msg":"queue.full.title"}`); got != upstream.ErrUpstreamQueueFull {
+		t.Fatalf("6021 应判 upstream_queue_full, got %v", got)
+	}
+	if got := upstream.Classify(429, `{"code":1,"msg":"rate limit"}`); got != upstream.ErrSoftRate {
+		t.Fatalf("普通 429 应仍判 soft_rate, got %v", got)
+	}
+}
+
 // TestNewHandlerSoftCooldownDefault 端到端：未注入 SoftCooldown 时基数回落到 600s（原为 60s）。
 func TestNewHandlerSoftCooldownDefault(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {

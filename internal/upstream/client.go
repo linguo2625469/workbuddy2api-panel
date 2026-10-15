@@ -41,6 +41,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrUpstreamQueueFull             // 6021 queue.full：上游准入队列满 → 上游容量信号（非账号故障）：不罚号、末端 503
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -68,6 +69,8 @@ func (k ErrKind) String() string {
 		return "prompt_too_long"
 	case ErrImageInvalid:
 		return "image_invalid"
+	case ErrUpstreamQueueFull:
+		return "upstream_queue_full"
 	case ErrAccountFault:
 		return "account_fault"
 	case ErrClient:
@@ -324,6 +327,44 @@ func hasBusinessCode(body, want string) bool {
 	return walk(root)
 }
 
+// queueFullMarkers 上游「准入队列满」文案关键词（大小写不敏感子串）。
+//
+// 实测形态（2026-10-15，cn 域两个账号 2 秒内同时命中）：
+//
+//	HTTP 429 + {"code":6021,"msg":"queue.full.title","requestId":"..."}
+//
+// "queue.full.title" 是上游未翻译的 i18n key，不是账号级限流文案，
+// 因此不能靠 softRateMarkers（那里没有 queue 词根）认出。
+var queueFullMarkers = []string{"queue.full", "queue full", "queue is full"}
+
+// IsUpstreamQueueFull 报告响应是否为大面积上游准入队列满（code 6021 / queue.full 文案）。
+//
+// 语义定位：上游**服务端容量**信号（排队满），不是账号配额、不是请求格式问题。
+// 与 429 账号级软限流的区别是处置方向完全相反：软限流该冷却账号轮换，
+// 队列满冷却账号只会把一个几秒的上游抖动放大成全池长时间不可用——
+//   1. 账号被 CooldownSoftRate 罚 600s 起；
+//   2. 同域账号全部冷却后，池子进入 pickEarliestExpiryLocked 兜底，
+//      主动把冷却号再送给上游；
+//   3. 兜底这一跳再撞 6021 → 又调一次 CooldownSoftRate → **续订** 600s。
+// 因为 (2)(3) 互相喂，冷却窗口会被无限续期，日志表现为「一整段时间里每个请求都 429」。
+//
+// 只认 HTTP 429：6021 是限流状态码的伴随业务码，其他状态码下的同名文案不作此判定。
+func IsUpstreamQueueFull(status int, body string) bool {
+	if status != http.StatusTooManyRequests {
+		return false
+	}
+	if hasBusinessCode(body, "6021") {
+		return true
+	}
+	lower := strings.ToLower(body)
+	for _, m := range queueFullMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // hasBusinessEnvelope 报告错误 body 是否携带上游业务信封形态（JSON 且含
 // `"code":` 或 `"msg":` 字段）。WAF 403 判定（IsWafBlocked）用「无业务信封」
 // 区分 APISIX WAF 拦截页（HTML/空体/纯文本）与上游业务层 403（带 code/msg
@@ -517,6 +558,15 @@ func Classify(status int, body string) ErrKind {
 	// 判定；无该 code 的 "credits exhausted" 文案仍保持普通 429 的软限流语义。
 	if status == http.StatusTooManyRequests && hasBusinessCode(body, "14018") {
 		return ErrHardCredit
+	}
+	// 6021 queue.full 必须先于通用 429 兜底：它是**上游容量**信号（服务端排队满），
+	// 不是账号级限流。若落进 status==429 分支会按 ErrSoftRate 冷却账号 600s 起，
+	// 而全池冷却后的 pickEarliestExpiryLocked 兜底又会把冷却号送回上游、再撞 6021
+	// 再续订冷却——互相喂成自持循环，一次几秒的上游抖动被放大成整段时间的全量 429
+	// （2026-10-15 现场：10:54–11:04、11:07–11:17 两段，客户端 35 次 429）。
+	// 判在 14018（账号积分耗尽，账号级终态）之后：账号级权威业务码优先。
+	if IsUpstreamQueueFull(status, body) {
+		return ErrUpstreamQueueFull
 	}
 	// status==429 先于 hardMarkers：限流响应 body 高频携带 "quota exceeded"/
 	// "额度不足" 等跨计费/限流两界的措辞，hardMarkers 先判会把限流误归

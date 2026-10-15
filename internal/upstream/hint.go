@@ -53,6 +53,10 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		return "upstream WAF blocked the gateway; retry after the block window"
 	case ErrSoftRate:
 		return "rate limited by upstream; retry after reset"
+	case ErrUpstreamQueueFull:
+		// 与 ErrSoftRate 的 hint 措辞刻意区分：那条指向「限流、等重置」，本条的成因是
+		// 上游当前排队满，与账号配额无关，等几秒再试即可，不需要换号或换模型。
+		return "upstream admission queue is full (transient upstream capacity, not an account quota); retry shortly, no need to switch account or model"
 	case ErrAccountFault:
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
 	case ErrSessionDead:

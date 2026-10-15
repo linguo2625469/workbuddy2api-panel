@@ -1143,6 +1143,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+		case upstream.ErrUpstreamQueueFull:
+			// 上游排队满：不是「你被限流」，而是「上游此刻忙」。用 503（服务端暂时不可用）
+			// 而非 429——429 在 OpenAI 兼容口径里是**客户端**该退避的限流，会让客户端按
+			// 「我的配额用完了」处理并长时间退避；这里语义是上游容量，通常几秒自愈。
+			// 下方统一逻辑会优先透传上游原文（含 code/msg/requestId），本行只在无原文时兜底。
+			status = http.StatusServiceUnavailable
+			code = "upstream_queue_full"
+			msg = "upstream request queue is full (transient upstream congestion, not an account quota issue), please retry shortly"
+			// 上游没给重置时间时给一条本地退避建议（秒）：不编造上游口径，只是把
+			// 「马上重试没意义、几秒后再来」这件事用标准头告诉客户端。
+			// 此刻尚未写过响应体，header 仍可设置。
+			if ue.RetryAfter <= 0 {
+				w.Header().Set("Retry-After", "5")
+			}
 		case upstream.ErrWafBlock:
 			if h.wafIP.active() {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
@@ -1366,6 +1380,20 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		if modelRateLimited {
 			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
 		}
+	case upstream.ErrUpstreamQueueFull:
+		// 6021 queue.full：上游**准入队列满**，是上游服务端容量信号，不是这个账号的问题
+		// （现场证据：cn 域两个互不相干的账号在 2 秒内同时命中，global 域 0 次；两号余额
+		// 各 4800+，排除额度耗尽）。
+		//
+		// 因此**零动作**——不冷却、不熔断、不 NoteError、不喂连败（同 ErrContentBlocked /
+		// ErrPromptTooLong 待遇）。这里是本补丁的要害：一旦按 ErrSoftRate 罚号，
+		// CooldownSoftRate 会把账号停 600s 起，而全池冷却后 pickEarliestExpiryLocked
+		// 兜底会主动把冷却号再送上游；兜底那一跳再撞 6021 又续订 600s——两者互相喂，
+		// 冷却永不自然到期，把几秒的上游排队放大成整段时间每个请求都失败。不罚号则
+		// 账号保持健康，上游一恢复，正常路径一次请求就能成功。
+		//
+		// 仍照常轮转（本分支由 chatCompletions 的 continue 路径走到）：同域账号未必
+		// 同时排队满，换个号可能直接成功；轮转次数由 MaxRotate 封顶，不会无限放大。
 	case upstream.ErrWafBlock:
 		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
 		// wafCooldownBase（60s，抖动后落 [45s,75s]）、softStreak 指数升级、封顶

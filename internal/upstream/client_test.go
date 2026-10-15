@@ -27,6 +27,18 @@ func TestClassify(t *testing.T) {
 		{200, `{"code":10001,"msg":"积分不足，请充值"}`, ErrHardCredit},
 		{400, `{"code":1,"msg":"额度用尽"}`, ErrHardCredit},
 		{429, ``, ErrSoftRate},
+		// 6021 queue.full：上游准入队列满，是**上游容量**信号而非账号级限流。
+		// 必须与 ErrSoftRate 分开：否则账号被罚 600s 起，而全冷却兜底会不停把冷却号
+		// 再送上游、再撞 6021 再续订冷却，互相喂成自持循环（2026-10-15 现场）。
+		{429, `{"code":6021,"msg":"queue.full.title","requestId":"341738971737c911985e5b9e67a4eceb"}`, ErrUpstreamQueueFull},
+		// 业务码须容忍 JSON 空白（信封形态不唯一）。
+		{429, `{"error":{"code": 6021, "msg":"queue.full.title"}}`, ErrUpstreamQueueFull},
+		// 无业务码但有 queue full 文案时同样识别。
+		{429, `upstream queue is full, try later`, ErrUpstreamQueueFull},
+		// 防过宽：6021 只在 429 上成立（非 429 的 6021 不按队列满处理）。
+		{400, `{"code":6021,"msg":"queue.full.title"}`, ErrClient},
+		// 防过宽：普通 429（无 queue 语义）仍是账号级软限流。
+		{429, `{"code":1,"msg":"rate limit exceeded"}`, ErrSoftRate},
 		// 限流文案（issue #28）：状态码不是 429 时也必须识别为软限流，
 		// 否则账号不会被冷却，下次请求仍会被选中。
 		{200, `{"code":11140,"msg":"The model provider is rate-limiting requests. Please wait a moment and try again."}`, ErrSoftRate},
