@@ -1213,14 +1213,188 @@ $('btnRefresh').onclick = async () => {
   if (view === 'logs') loadLogs();
 };
 
+/* ── 官方补偿（issue #189）─────────────────────────────────────────
+   「查状态 → 待领才领」。
+
+   取数与呈现刻意分开：
+     - 取数只有手动触发（进页面一次 + 「检查」/「领取」后）。补偿状态没有
+       overview 快照可吃，必须逐号打上游，挂进 5s 轮询就是每 5 秒轰炸上游。
+     - 呈现走 compCache 的本地重渲染（refreshVisible 每轮调一次），只为让
+       倒计时走动 —— 不发任何请求。
+   之前这里有个「5 分钟新鲜窗口」分支，但它唯一的非强制调用点是 start()，
+   而那里 compCache 必为 null，所以该分支永远不会命中：注释宣称「防轰炸」，
+   实际是「根本不刷新」。现已删除，别再加回来。
+
+   声明位置在本段（轮询区之前）是必需的：start() 会调用 loadCompensation()，
+   若这些 let 写在 start() 之后，顶层求值会在 TDZ 上炸——
+   TestAppJSTopLevelSmoke 正是为这类问题设的闸门。 */
+let compCache = null;
+let compInFlight = null;   // 在途请求的 promise（非布尔标志：布尔标志配 force 刷新会静默空转）
+
+// compPending 挑出「可领未领」的账号。
+// 纯函数：判据独立于渲染，node 侧单测单独钉住。
+// 判据与后端 upstream.CompensationStatus.Pending() 对齐——两端各留一份实现是
+// 有意为之（前端要在渲染前先算总数），但**必须同步**，改一处就要改另一处。
+function compPending(rows) {
+  return (rows || []).filter(r => r && !r.skip && !r.error && r.status &&
+    r.status.active && !r.status.claimed && (r.status.credit_num || 0) > 0);
+}
+
+// compErrored 挑出「查询失败」的账号。
+// 单独拎出来，是因为它们**必须显形**：上游 5xx / token 过期时所有账号都会落到
+// 这里，若和「没有补偿」一起被过滤掉，卡片就会整块消失，用户看到的是「什么都没有」
+// ——而真相是「一个都没查成」。这正是本 PR 要消灭的静默失败。
+function compErrored(rows) {
+  return (rows || []).filter(r => r && r.error);
+}
+
+// compTotalPending 待领总额。
+function compTotalPending(rows) {
+  return compPending(rows).reduce((s, r) => s + (r.status.credit_num || 0), 0);
+}
+
+// compDeadlineText 领取截止倒计时文案。
+// 上游 end_time 形如 "2026-10-22 23:59:59" 且**不带时区**，按浏览器本地时区解析
+// （与后端积分到期的处理同口径）。urgent=true 表示距截止 <=48h，前端据此染色告警。
+function compDeadlineText(endTime, now) {
+  const raw = String(endTime == null ? '' : endTime).trim();
+  if (!raw) return { text: '无截止信息', urgent: false };
+  const t = new Date(raw.replace(' ', 'T')).getTime();
+  if (!isFinite(t)) return { text: raw, urgent: false };
+  const ms = t - (now || Date.now());
+  if (ms <= 0) return { text: '已截止', urgent: true };
+  const d = Math.floor(ms / 86400000);
+  const h = Math.floor(ms % 86400000 / 3600000);
+  const text = d > 0 ? (d + ' 天 ' + h + ' 小时') : (Math.max(1, h) + ' 小时');
+  return { text: '剩 ' + text, urgent: ms <= 2 * 86400000 };
+}
+
+function renderCompensation(d) {
+  const rows = (d && d.accounts) || [];
+  const box = $('compBox');
+  if (!box) return;
+  const active = rows.filter(r => r && !r.error && r.status && r.status.active);
+  const failed = compErrored(rows);
+  // 「有失败就必须显形」——哪怕一条有效数据都没有。
+  if (!active.length && !failed.length) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const now = Date.now();
+  const okRows = active.map(r => {
+    const s = r.status || {};
+    const done = !!s.claimed;
+    const dl = compDeadlineText(s.end_time, now);
+    const name = esc(r.nickname || String(r.uid).slice(0, 8));
+    return '<div class="comp-row"><span>' + name + '</span>' +
+      (done
+        ? '<span class="tag ok">已领取</span>'
+        : '<span class="tag warn">待领取</span>' +
+          '<span class="tag' + (dl.urgent ? ' bad' : ' mute') + '">' + esc(dl.text) + '</span>') +
+      '<span class="tag mute">' + esc(fmtTok(s.credit_num || 0)) + ' 积分</span>' +
+      (done ? '' : '<button class="xs" data-comp-uid="' + esc(r.uid) + '">领取</button>') +
+      '</div>';
+  }).join('');
+  // err 文本来自上游响应体，是外部可控字符串，必须 esc。
+  const errRows = failed.map(r =>
+    '<div class="comp-row"><span>' + esc(r.nickname || String(r.uid).slice(0, 8)) + '</span>' +
+    '<span class="tag bad">查询失败</span>' +
+    '<span class="tag mute">' + esc(String(r.error).slice(0, 120)) + '</span></div>'
+  ).join('');
+
+  $('compList').innerHTML = okRows + errRows;
+
+  const n = compPending(rows).length;
+  let note = n ? (n + ' 个账号待领 · 共 ' + fmtTok(compTotalPending(rows)) + ' 积分') : '当前无待领补偿';
+  // 混合态下也要把失败数说出来，否则 note 仍读作「没事」。
+  if (failed.length) note += ' · ' + failed.length + ' 个账号查询失败';
+  $('compNote').textContent = note;
+}
+
+// renderCachedCompensation 从缓存重渲染（不发请求），让倒计时走动。
+// 由 refreshVisible 每轮调用；无缓存（还没查过）时什么都不做。
+function renderCachedCompensation() {
+  if (compCache) renderCompensation(compCache);
+}
+
+async function loadCompensation() {
+  // 已有在途请求就等它跑完，而不是静默返回——领取后紧接着的刷新必须能看到新状态，
+  // 否则用户点了「领取」但列表纹丝不动。
+  if (compInFlight) { await compInFlight; return; }
+  compInFlight = (async () => {
+    try {
+      const d = await api('compensation');
+      compCache = d;
+      renderCompensation(d);
+    } catch (e) {
+      const box = $('compBox');
+      if (box) box.hidden = false;
+      if ($('compList')) $('compList').innerHTML =
+        '<div class="empty">查询失败：' + esc(e.message) + '</div>';
+      if ($('compNote')) $('compNote').textContent = '';
+    }
+  })();
+  try {
+    await compInFlight;
+  } finally {
+    compInFlight = null;   // 必须 finally：否则一次异常就让此后所有刷新永久失效
+  }
+}
+
+// 领取按钮走事件委托：列表每次重渲染都整块换 innerHTML，绑在具体节点上必丢。
+if ($('compList')) $('compList').addEventListener('click', async e => {
+  const b = e.target.closest('[data-comp-uid]');
+  if (!b) return;
+  b.disabled = true;
+  try {
+    const r = await api('accounts/' + encodeURIComponent(b.dataset.compUid) + '/compensation', { method: 'POST' });
+    const res = r.result || {};
+    if (res.claimed) toast('已领取 ' + fmtTok(res.credit || 0) + ' 积分', 'ok');
+    else if (res.error) toast('查询失败，未能确认是否有补偿', 'err');
+    else if (res.skip) toast(res.skip_msg || '无需领取', '');
+    else toast('领取失败：未知结果', 'err');
+    await loadCompensation();
+    loadOverview(true);
+  } catch (err) {
+    toast('领取失败：' + err.message, 'err');
+  }
+});
+
+if ($('btnCompRefresh')) $('btnCompRefresh').onclick = () => loadCompensation();
+
+if ($('btnCompClaimAll')) $('btnCompClaimAll').onclick = async () => {
+  const b = $('btnCompClaimAll');
+  b.disabled = true;
+  try {
+    const r = await api('compensation_all', { method: 'POST' });
+    const s = r.summary || {};
+    // 顺序要紧：先看有没有账号没拿到结论，再看有没有领到。
+    // 只按 claimed 判定的话，「全部查询失败」会被说成「当前没有待领补偿」，
+    // 把故障说成了「没活动」——比不说更糟。
+    if (s.errored) {
+      toast(s.errored + ' 个账号查询失败，未能确认是否有补偿', 'err');
+    } else if (s.claimed) {
+      toast('已领取 ' + s.claimed + ' 个账号，共 ' + fmtTok(s.credit || 0) + ' 积分', 'ok');
+    } else {
+      toast('当前没有待领补偿', '');
+    }
+    await loadCompensation();
+    loadOverview(true);
+  } catch (e) {
+    toast('领取失败：' + e.message, 'err');
+  } finally {
+    b.disabled = false;
+  }
+};
+
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
-  if (view === 'accounts') loadOverview(true);
+  if (view === 'accounts') { loadOverview(true); renderCachedCompensation(); }
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }
 function start() {
   loadOverview(true);
+  loadCompensation();                       // 补偿状态：首次进页面查一次（之后靠新鲜窗口）
   if (refTimer) clearInterval(refTimer);
   refTimer = setInterval(refreshVisible, 5000);
   checkAuthGate();

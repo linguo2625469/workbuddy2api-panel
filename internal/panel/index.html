@@ -203,6 +203,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .box > header select, .box > header input { width: auto; }
 .box > header h3 { white-space: nowrap; }
 .box .pad { padding: 17px; }
+/* 补偿活动行：昵称 / 状态标 / 截止倒计时 / 额度 / 领取按钮，单行紧凑排布。
+   沿用 .tag 体系染色（ok=已领、warn=待领、bad=临期、mute=中性信息）。 */
+.comp-row { display: flex; align-items: center; gap: 9px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+.comp-row:last-child { border-bottom: none; }
 
 /* ── 账号表（签名元素：健康色条 + 积分量条）───────────────────────── */
 .tbl-wrap { overflow-x: auto; }
@@ -660,6 +664,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnExp">检查</button>
         </header>
         <div class="pad"><div id="expList"></div></div>
+      </div>
+
+      <!-- 官方补偿活动（issue #189）：「模型服务异常额外补偿 N 积分」这类限时补偿在账号侧
+           可见，但网关原先只在每日签到后盲领一次，「没有 / 已领过 / 领取真失败」三态在
+           日志里同构，补偿带截止日时签到一停就静默过期。这里把它显式摆出来：截止倒计时 +
+           逐号领取 + 全部领取。无生效活动时整卡隐藏——隐藏的是卡片本身、且渲染不依赖用户
+           点它，故不构成 issue #137 那种「入口藏在自己隐藏卡片里」的死锁。 -->
+      <div class="box" id="compBox" hidden>
+        <header>
+          <h3>官方补偿<span class="hint">服务异常等限时补偿 · 查状态后按需领取 · 不占用每日签到</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="compNote"></span>
+          <button class="xs" id="btnCompRefresh">检查</button>
+          <button class="xs" id="btnCompClaimAll">全部领取</button>
+        </header>
+        <div class="pad"><div id="compList"></div></div>
       </div>
 
       <div class="box">
