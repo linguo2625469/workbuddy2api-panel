@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -208,6 +209,53 @@ func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 // 直读字段（EnterpriseID 自 Parse 后不再改写，与 upstream 读取方式一致），
 // 无需加锁——Realm() 加锁是因为 realm/Domain 会被 RefreshToken 在锁内改写。
 func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
+
+// IsEnterpriseSession 报告当前凭证是否处于「企业上下文」：
+// 账号本身是企业版（IsEnterprise），或 AccessToken 签发自**企业切换会话**
+// （JWT payload 带 token_source=enterprise_switch——浏览器在企业空间状态下
+// 完成 OAuth 授权时签发）。
+//
+// 为什么单独一站：企业切换会话与真企业版的上游表现**不同**（实测 2026-10-12，
+// 同一时刻与个人号 A/B 对照）——成长任务列表 / 额度查询 / 领养 Buddy 等**读端点
+// 与直连 API 照常**，但 /v2/report 行为事件**返回 200 却被静默丢弃**（15 个成长
+// 任务全部 0/x，重跑并 90s 内逐 15s 回读进度从不跳动），连登 / 签到同样无效。
+// 即「读得见、记不上账」：不跳过则队列每轮白跑全部任务（含真实对话配额）且
+// 无任何报错。因此行为类任务（活跃上报 / 连登 / 旅行 / 夜猫子 / 成长任务执行）
+// 的门控应使用本方法；签到与任务列表扫描不在此列（签到失败是显式报错，
+// 列表扫描实测可用）。额度查询 / 选号 / 保活照常（按 IsEnterprise 口径）。
+//
+// 每次现解码 JWT 而非 Parse 时缓存：RefreshToken 会整体换发 token，
+// 企业切换状态可能随重新授权翻转，缓存会读到过期形态。解码成本仅一次
+// base64 + 小 JSON（每调度轮每账号数次），可忽略。
+func (a *Auth) IsEnterpriseSession() bool {
+	if a.IsEnterprise() {
+		return true
+	}
+	return jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
+}
+
+// jwtTokenSource 解出 JWT payload 中的 token_source 声明；非 JWT / 解码失败
+// 一律返回 ""（老 token 与非标准形态按无此声明处理，零回归）。先按无填充
+// base64url 解（JWT 标准），失败再试带填充形态（兼容非标准签发方）。
+func jwtTokenSource(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if raw, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
+			return ""
+		}
+	}
+	var payload struct {
+		TokenSource string `json:"token_source"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	return payload.TokenSource
+}
 
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。
 // 同时接受裸域 workbuddy.ai 与任意子域（HasSuffix("www.workbuddy.ai") 或裸域本身）。
