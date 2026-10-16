@@ -573,6 +573,21 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 
 > 成员账号**无权查询企业池总额度**（实测：池端点在成员 token 下返回 `403 not_authorized`，`/console/accounts` 显示 `isAdmin=false`）。面板展示的只是**该账号被分配的额度**；企业池余额只有企业管理员在管理后台可见。
 
+#### 静态 API Key 账号（面板「添加账号 → API Key」）
+
+CodeBuddy 平台签发的**静态 API Key**（`ck_` / `pt_` 前缀，控制台 API Key 页签发，官方用途是给 CodeBuddy CLI 用）可以直接当账号用：面板「添加账号 → API Key」粘贴即可，无需浏览器登录。落盘仍是 `auths/workbuddy-<uid>.json`（`accessToken` 存 Key、`refreshToken` 为空、`expiresAt` 0、`enterpriseId` 留空），uid 缺省取 Key 的 `<id>` 段拼成 `apikey-<id>`。
+
+判定（`auth.Auth.IsAPIKey()`）只看 access token 前缀——官方 CLI 的判据是 `tokenType === "ApiKey"` 且 token 以 `ck_` / `pt_` 开头，落盘形态里前缀是唯一稳定、跨进程一致的判据。它与企业版共用「无个人成长体系」门控（`auth.Auth.SupportsPersonalGrowth()`），但**不等同**企业版：没有企业身份，不注入 `X-Enterprise-Id` / `X-Tenant-Id`。
+
+| 能力 | 静态 API Key 账号 |
+|---|---|
+| chat / 选号派发 | 照常；出站按官方 CLI 双头 `Authorization: Bearer <key>` + `X-API-Key: <key>` |
+| token 刷新 / 保活 | **不适用**（refresh 端点只认 OAuth 设备流）：`NeedsRefresh()` 恒 false，不会因为"刷新失败"把好号冷却换号 |
+| 签到 / 活跃上报 / 成长任务 / 连登管家 / 猫猫旅行 / 夜猫子 | **全部不适用**（无个人账号身份，上游 403 / 400「企业账号不支持该操作」）：排程一个请求都不发；面板不渲染这些按钮；单账号任务类接口（`checkin` / `tasks` / `tasks/accept_all` / `tasks/auto` / `tasks/auto_all`）返回 `422` 并附说明，而不是执行后静默无效 |
+| 额度 | 走**企业口径** `POST /v2/billing/meter/get-enterprise-user-usage`（个人 `get-user-resource` 对静态 Key 返回空 `Accounts`）：由余额定时器（`schedule.balance_refresh_*`）与面板「额度」按钮刷新，不依赖 refresh token |
+
+导入 JSON（cockpit 形态）同样接受 `refresh_token` 为空的记录：必填判据只要求 `uid` + `access_token` 非空（issue #165 的 access-token-only 场景，静态 Key 凭证本就没有 refresh token）。
+
 #### 连登管家（签到排程末尾自动执行）
 
 成长中心的连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。管家在每日签到后自动跑一遍闭环（幂等，未解锁静默跳过）：
@@ -672,7 +687,7 @@ http://127.0.0.1:7863/panel/
 | 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
 | 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
-| 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
+| 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` · `POST accounts/add_apikey`（静态 API Key，见上） |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。

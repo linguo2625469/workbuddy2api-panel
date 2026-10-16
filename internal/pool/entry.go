@@ -88,6 +88,10 @@ type Status struct {
 	// 企业版无个人成长体系（签到/成长任务/连登/旅行/夜猫子 上游均拒），
 	// 面板据此隐藏对应按钮；选号、保活、额度展示不受影响。
 	Enterprise      bool       `json:"enterprise,omitempty"`
+	// APIKey 静态 API Key 账号（accessToken 以 ck_/pt_ 开头，auth.IsAPIKey 计算值
+	// 不落盘）。同样无个人成长体系且不可刷新，额度走企业口径；面板据此隐藏
+	// 成长类按钮、显「静态凭证」，选号与额度展示不受影响。
+	APIKey          bool       `json:"api_key,omitempty"`
 	Disabled        bool       `json:"disabled"`
 	DisabledReason  string     `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
 	// Paused 暂停选号：退出选号候选（与 disabled 一样不参与选号），但**照常参与**

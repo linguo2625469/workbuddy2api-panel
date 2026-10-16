@@ -1197,6 +1197,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <h3>添加账号</h3>
       <div class="tabs" id="addTabs">
         <button class="tab on" data-tab="login">浏览器登录</button>
+        <button class="tab" data-tab="apikey">API Key</button>
         <button class="tab" data-tab="import">导入 JSON</button>
       </div>
     </header>
@@ -1220,6 +1221,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div id="addDone" class="state ok" hidden></div>
         <div id="addErr" class="state err" hidden></div>
       </div>
+      <!-- API Key -->
+      <div id="addTabApiKey" class="tab-panel" hidden>
+        <div class="hint" style="margin-bottom:8px">粘贴 CodeBuddy 平台签发的静态 API Key（ck_/pt_ 前缀）。添加后直接可用、无需浏览器登录；该账号无签到 / 成长任务体系，额度走企业口径。</div>
+        <input type="password" id="apiKeyInput" placeholder="ck_..." autocomplete="off" style="width:100%;margin-bottom:8px">
+        <input type="text" id="apiKeyNickname" placeholder="昵称（可选）" autocomplete="off" style="width:100%;margin-bottom:8px">
+        <input type="text" id="apiKeyUid" placeholder="uid（可选，缺省由 key 派生）" autocomplete="off" style="width:100%;margin-bottom:8px">
+        <div id="apiKeyDone" class="state ok" hidden></div>
+        <div id="apiKeyErr" class="state err" hidden></div>
+      </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
         <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
@@ -1231,6 +1241,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <footer>
       <span class="grow"></span>
       <button id="btnStartLogin" class="primary">获取授权链接</button>
+      <button id="btnAddApiKey" class="primary" hidden>添加 API Key</button>
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>

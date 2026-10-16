@@ -2049,9 +2049,10 @@ func (c *Client) enterpriseResource(a *auth.Auth, soon time.Duration) (remain, t
 // earliestAt 是最早的可用到期时刻，earliestRemaining 是同一时刻所有正余额包的剩余量之和。
 // 已过期、剩余为 0、缺少或无法解析到期时间的包都不会成为最早批次；无有效批次时返回零值。
 func (c *Client) UserResourceDetailedWithExpiry(a *auth.Auth, soon time.Duration) (remain, total, expiring int64, earliestAt time.Time, earliestRemaining int64, err error) {
-	// 企业版额度不在「个人资源包」体系内：get-user-resource* 对 enterpriseId 非空账号
-	// 恒返回空 Accounts（实测 code 0 且 Accounts null），故分流到企业口径端点。
-	if a.IsEnterprise() {
+	// 企业版与静态 API Key 额度都不在「个人资源包」体系内：get-user-resource* 对
+	// 二者恒返回空 Accounts（企业号有 enterpriseId；静态 Key 无个人账号身份），
+	// 故统一分流到企业口径端点。
+	if a.UsesEnterpriseBilling() {
 		return c.enterpriseResource(a, soon)
 	}
 	now := time.Now()

@@ -158,6 +158,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
 	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
+	p.mux.HandleFunc("POST /panel/api/accounts/add_apikey", p.withAuth(p.addAPIKey))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
@@ -515,6 +516,11 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
+	// 静态 API Key 账号无签到/成长任务体系：明确拒绝（不静默空跑），额度刷新请走 /balance。
+	if a.IsAPIKey() {
+		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系（请用「额度」刷新企业口径额度）")
+		return
+	}
 	checkinMsg := ""
 	checkinDone := false
 	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
@@ -672,6 +678,11 @@ func (p *Panel) syncNicknames() {
 			continue
 		}
 		if a := p.cfg.Pool.AuthByUID(st.UID); a != nil && a.AccessTokenValue() != "" {
+			// 静态 API Key 账号没有个人账号资料（/console/account 对它无效），
+			// 发起只会每次多一行「失败」日志，昵称以添加时填写的为准。
+			if a.IsAPIKey() {
+				continue
+			}
 			jobs = append(jobs, job{uid: st.UID, a: a})
 		}
 	}

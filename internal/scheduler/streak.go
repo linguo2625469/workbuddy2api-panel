@@ -29,8 +29,8 @@ func (s *Scheduler) RunStreakBonusNow() {
 		if a.IsGlobal() {
 			continue // D4 门控：global 无 CN 任务体系，不发起任何上游调用
 		}
-		if a.IsEnterprise() {
-			continue // 企业版门控：无成长体系（/activity/growth/streak 上游一律 403）
+		if !a.SupportsPersonalGrowth() {
+			continue // 企业版与静态 API Key 账号均无成长体系（/activity/growth/streak 上游一律 403）
 		}
 		s.streakBonusAccount(a)
 	}

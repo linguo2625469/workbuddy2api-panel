@@ -190,6 +190,52 @@ func BackfillRealmFor(a *Auth, realm string) (bool, error) {
 // IsGlobal 报告账号是否属于 global realm（= Realm() == "global"）。
 func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 
+// apiKeyPrefixes 静态 API Key 的前缀集合：ck_（CodeBuddy 控制台签发）与
+// pt_（官方 CLI @tencent-ai/codebuddy-code 另有该前缀）。
+// 官方 CLI 的判据是 tokenType === "ApiKey" 且 token 以这两个前缀之一开头；
+// auth 文件不持久化 tokenType（refresh 只认 OAuth 设备流，静态 Key 无法刷新），
+// 前缀是落盘形态里唯一稳定、跨进程一致的判据。
+var apiKeyPrefixes = []string{"ck_", "pt_"}
+
+// isAPIKeyToken 判 token 是否以静态 API Key 前缀开头。
+func isAPIKeyToken(at string) bool {
+	for _, p := range apiKeyPrefixes {
+		if strings.HasPrefix(at, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAPIKeyLocked IsAPIKey 的无锁内部实现：仅限**已持 a.mu** 的调用方使用
+// （sync.Mutex 不可重入，锁内再调 AccessTokenValue 会自锁）。
+func (a *Auth) isAPIKeyLocked() bool { return isAPIKeyToken(a.AccessToken) }
+
+// IsAPIKey 报告账号是否为静态 API Key 账号（AccessToken 以 ck_/pt_ 开头）。
+// 经 AccessTokenValue() 加锁读取：RefreshToken 会在锁内改写 AccessToken。
+//
+// 语义：静态 Key 直接可用（Authorization: Bearer <key>），但**无个人成长体系**
+// （签到/成长任务/连登/旅行/夜猫子一律不适用），且额度只能走企业口径端点
+// （个人 get-user-resource 对静态 Key 返回空 Accounts），见 UsesEnterpriseBilling。
+func (a *Auth) IsAPIKey() bool {
+	if a == nil {
+		return false
+	}
+	return isAPIKeyToken(a.AccessTokenValue())
+}
+
+// UsesEnterpriseBilling 报告账号的额度查询是否走企业口径端点
+// （/v2/billing/meter/get-enterprise-user-usage）。
+// 企业版与静态 API Key 账号同属此列：个人 get-user-resource 对二者均返回空
+// Accounts（企业账号无个人资源包；静态 Key 无个人账号身份），额度必须走企业口径。
+func (a *Auth) UsesEnterpriseBilling() bool { return a.IsEnterprise() || a.IsAPIKey() }
+
+// SupportsPersonalGrowth 报告账号是否具备个人成长体系（签到 / 成长任务 / 连登管家 /
+// 猫猫旅行 / 夜猫子）。企业版与静态 API Key 账号都没有该体系：企业版上游一律拒绝
+// （400 code 10001 / 403 growth-only），静态 Key 账号则根本没有个人账号身份。
+// scheduler 五类任务与 panel 成长入口据此并列门控，避免对注定失败的端点空发请求。
+func (a *Auth) SupportsPersonalGrowth() bool { return !a.IsEnterprise() && !a.IsAPIKey() }
+
 // IsEnterprise 报告账号是否为企业版（auth 文件带非空 enterpriseId）。
 //
 // 企业版**没有个人成长体系**：签到 / 成长任务 / 连登管家 / 猫猫旅行 / 夜猫子
@@ -220,6 +266,11 @@ func isGlobalDomain(d string) bool {
 func (a *Auth) NeedsRefresh(within time.Duration) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	// 静态 API Key 永不刷新（refresh 端点只认 OAuth 设备流）：恒 false，否则
+	// server 请求路径会先 refresh、失败后把该号当坏号冷却换号——Key 本身是好的。
+	if a.isAPIKeyLocked() {
+		return false
+	}
 	if a.ExpiresAt <= 0 {
 		return true
 	}

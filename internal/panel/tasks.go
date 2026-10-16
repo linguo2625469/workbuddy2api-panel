@@ -33,6 +33,11 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	// 静态 API Key 账号无成长任务体系：明确拒绝（不静默空跑）。
+	if a.IsAPIKey() {
+		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系")
+		return
+	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "list tasks: "+err.Error())
@@ -87,6 +92,11 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	// 静态 API Key 账号无成长任务体系：明确拒绝（不静默空跑）。
+	if a.IsAPIKey() {
+		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系")
 		return
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)

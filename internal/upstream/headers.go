@@ -203,6 +203,11 @@ func (c *Client) ChatHeaders(req *http.Request, a *auth.Auth, clientIP string, m
 	// （见 auth.AccessTokenValue 注释）。
 	if at := a.AccessTokenValue(); at != "" {
 		req.Header.Set("Authorization", "Bearer "+at)
+		// 静态 API Key 账号：官方 CLI 两个头都发（Authorization 与 X-API-Key 任一
+		// 均可鉴权），双头对齐官方形态，避免只看 X-API-Key 的边缘网关判定缺头。
+		if a.IsAPIKey() {
+			req.Header.Set("X-API-Key", at)
+		}
 	} else {
 		req.Header.Set("X-No-Authorization", "1")
 	}

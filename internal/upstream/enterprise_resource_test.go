@@ -130,3 +130,35 @@ func TestPersonalResourceStaysOnPackageEndpoint(t *testing.T) {
 		t.Fatal("应至少请求一次资源包端点")
 	}
 }
+
+// TestAPIKeyRoutesToEnterpriseBilling 静态 API Key 与企业版同口径：额度查询分流到
+// get-enterprise-user-usage（个人 get-user-resource 对二者均返回空 Accounts），
+// 且不注入 X-Enterprise-Id（无企业身份）。
+func TestAPIKeyRoutesToEnterpriseBilling(t *testing.T) {
+	var paths []string
+	var gotEnt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		gotEnt = r.Header.Get("X-Enterprise-Id")
+		w.Write([]byte(`{"code":0,"msg":"OK","data":{"credit":100,"limitNum":500}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), BillingBaseCN: srv.URL}
+	a := &auth.Auth{UID: "u1", AccessToken: "ck_9f3a2b1c.deadbeef"}
+
+	remain, total, _, _, _, err := c.UserResourceDetailedWithExpiry(a, 0)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if len(paths) == 0 || !strings.HasSuffix(paths[0], "/v2/billing/meter/get-enterprise-user-usage") {
+		t.Errorf("paths=%v want .../get-enterprise-user-usage", paths)
+	}
+	if gotEnt != "" {
+		t.Errorf("API Key 不应注入 X-Enterprise-Id，实际=%q", gotEnt)
+	}
+	// 500 - 100 = 400。
+	if remain != 400 || total != 500 {
+		t.Errorf("remain=%d total=%d want 400/500", remain, total)
+	}
+}

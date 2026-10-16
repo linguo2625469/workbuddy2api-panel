@@ -76,7 +76,10 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		uid := strings.TrimSpace(acc.UID)
 		at := strings.TrimSpace(acc.AccessToken)
 		rt := strings.TrimSpace(acc.RefreshToken)
-		if uid == "" || at == "" || rt == "" {
+		// 必填判据只要求 uid + access_token 非空：refresh_token 可以缺（issue #165 的
+		// access-token-only 导出——例如静态 API Key 凭证，本就没有 refresh token）。
+		// 缺 refresh_token 的账号仍可接流量与刷新额度，只是不参与保活刷新。
+		if uid == "" || at == "" {
 			skipped++
 			errs = append(errs, fmt.Sprintf("missing required fields (id=%s)", acc.ID))
 			continue

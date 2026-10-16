@@ -622,6 +622,11 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	// 静态 API Key 账号无个人成长体系：明确拒绝（任务端点上游一律 403，静默空跑只会浪费配额）。
+	if !a.SupportsPersonalGrowth() {
+		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系")
+		return
+	}
 	var body struct {
 		TaskCode string `json:"task_code"`
 	}
@@ -1238,6 +1243,11 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	// 静态 API Key 账号无个人成长体系：明确拒绝（同 accountTaskAuto）。
+	if !a.SupportsPersonalGrowth() {
+		writeErr(w, http.StatusUnprocessableEntity, "API Key 账号无签到/成长任务体系")
 		return
 	}
 	// per-account 互斥（与单任务动作共用一把锁）：重复点击 409。

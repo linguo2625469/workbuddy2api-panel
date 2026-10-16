@@ -77,9 +77,10 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 			if a.IsGlobal() {
 				return
 			}
-			// 企业版门控：同上——企业版无个人成长体系（GET /v2/activity/growth/tasks
-			// 上游 403「growth system is only available for personal users」）。
-			if a.IsEnterprise() {
+			// 企业版与静态 API Key 账号门控：同上——二者无个人成长体系
+			// （GET /v2/activity/growth/tasks 上游 403「growth system is only available
+			// for personal users」）。
+			if !a.SupportsPersonalGrowth() {
 				return
 			}
 			if tasks, err := p.cfg.Upstream.ListTasks(a); err != nil {
@@ -222,8 +223,8 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 			if a.IsGlobal() {
 				return
 			}
-			// 企业版门控：同上（企业版无个人成长体系，任务端点上游一律 403）。
-			if a.IsEnterprise() {
+			// 企业版与静态 API Key 账号门控：同上（二者无个人成长体系，任务端点上游一律 403）。
+			if !a.SupportsPersonalGrowth() {
 				return
 			}
 			if growth {
