@@ -100,6 +100,14 @@ func cloneUsageDetails(usage map[string]any, key string) map[string]any {
 	return out
 }
 
+// UsagePromptTokens 返回 usage 顶层的 prompt_tokens；缺失或非数值时 ok=false。
+func UsagePromptTokens(usage map[string]any) (float64, bool) {
+	if usage == nil {
+		return 0, false
+	}
+	return usageNumber(usage, "prompt_tokens")
+}
+
 // UsageCacheHitTokens 返回 usage 里的缓存命中 token 数（多别名取最优，口径与
 // 回写给客户端的 normalizeUsageCacheAliases 一致）。供网关统计层（usage 桶 /
 // reqlog）观测命中率使用；usage 缺失该维度时 ok=false。

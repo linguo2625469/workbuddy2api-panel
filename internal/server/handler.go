@@ -1087,9 +1087,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		credit, total, hasCredit := usageCreditTotal(resp)
 		if usage, ok := resp["usage"].(map[string]any); ok {
-			if hit, okH := upstream.UsageCacheHitTokens(usage); okH {
-				miss, _ := upstream.UsageCacheMissTokens(usage)
-				st.cacheHit, st.cacheMiss, st.hasCache = int64(hit), int64(miss), true
+			if hit, miss, okC := cacheTokensFromUsage(usage); okC {
+				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
 			}
 		}
 		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)

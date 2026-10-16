@@ -209,9 +209,12 @@ func (s *chatStatsReader) parseSSELine(line string) {
 }
 
 // CacheTokens 返回末帧 usage 的缓存命中 / 未命中 token 数。miss 缺失时按
-// prompt - hit 推导；hit 与 miss 均不可得时 ok=false（不参与命中率统计）。
+// prompt - hit 推导；对称地，miss 显式存在而 hit 为 0 / 缺失时按 prompt - miss
+// 反推 hit（issue #170：上游在「接近全命中」时可能回 hit=0 + miss=3 这类组合，
+// 不反推会被误判为整段未命中）。两个方向都推导不出时 ok=false（不参与命中率
+// 统计）。
 func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
-	if !s.hasCacheHit {
+	if !s.hasCacheHit && !s.hasCacheMiss {
 		return 0, 0, false
 	}
 	hit = int64(s.cacheHit)
@@ -221,6 +224,10 @@ func (s *chatStatsReader) CacheTokens() (hit, miss int64, ok bool) {
 			return hit, 0, true
 		}
 		miss = int64(s.promptTokens - s.cacheHit)
+	} else if s.cacheHit == 0 && s.hasPromptTokens && s.promptTokens > s.cacheMiss {
+		// hit 为 0 / 缺失但 miss 可信（prompt > miss，即确有命中量）→ 反推。
+		// prompt <= miss 时保持 hit=0，那是真实的整段未命中。
+		hit = int64(s.promptTokens - s.cacheMiss)
 	}
 	return hit, miss, true
 }
@@ -276,6 +283,25 @@ func parseModelFromBody(body []byte) string {
 		return "-"
 	}
 	return obj.Model
+}
+
+// cacheTokensFromUsage 从非流式聚合响应的 usage 里提取缓存命中 / 未命中 token
+// 数，与流式侧 CacheTokens 的推导口径对称：hit 不可得（缺失或 0）但 miss 显式
+// 存在时，按 prompt - miss 反推 hit（issue #170）；prompt <= miss 时保持 hit=0
+// （真实的整段未命中）。两个方向都不可得时 ok=false。
+func cacheTokensFromUsage(usage map[string]any) (hit, miss int64, ok bool) {
+	h, okH := upstream.UsageCacheHitTokens(usage)
+	m, okM := upstream.UsageCacheMissTokens(usage)
+	switch {
+	case okH:
+		return int64(h), int64(m), true
+	case okM:
+		if p, okP := upstream.UsagePromptTokens(usage); okP && p > m {
+			return int64(p - m), int64(m), true
+		}
+		return 0, int64(m), true
+	}
+	return 0, 0, false
 }
 
 // usageDeltaFromResponse 从非流式聚合响应中提取明确存在的 token 字段。
