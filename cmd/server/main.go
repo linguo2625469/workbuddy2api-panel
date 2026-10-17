@@ -225,6 +225,12 @@ func main() {
 	case cfg.BalanceRefreshInterval > 0:
 		log.Printf("余额后台刷新：每 %s（签到时点照常额外刷新）", cfg.BalanceRefreshInterval)
 	}
+	switch {
+	case !cfg.Schedule.TaskSweepEnabled:
+		log.Printf("任务补领清扫已禁用（schedule.task_sweep_enabled=false）")
+	case cfg.TaskSweepInterval > 0:
+		log.Printf("任务补领清扫：每 %s（补领已达标未领的成长任务奖励）", cfg.TaskSweepInterval)
+	}
 	if cfg.Schedule.IncludeDisabledInTasks {
 		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
@@ -288,6 +294,9 @@ func main() {
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
+	// 清扫回调返回统计汇总（测试/日志可观测），调度器 hook 只要求 func()：
+	// 这里收掉返回值——汇总已由 panel 侧内部日志输出。
+	sch.SetTaskSweepHook(func() { pn.RunTaskSweepOnce() })
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
@@ -316,6 +325,7 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	sch.StartTaskSweep(ctx, cfg.TaskSweepInterval)
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
@@ -504,6 +514,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
+	sch.SetTaskSweepInterval(newCfg.TaskSweepInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
 	return restartRequiredFields(newCfg), nil

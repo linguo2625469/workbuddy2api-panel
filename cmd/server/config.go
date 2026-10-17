@@ -106,6 +106,13 @@ type Config struct {
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
+
+		// 任务补领清扫（issue #174）：周期把「已达标但未领奖」的成长任务领掉——
+		// 这条链路此前完全缺失（成长队列要求有自动动作、一键完成对达标任务直接跳过），
+		// 导致积分长期卡在 2000/2100/2300 上不去 4000。
+		// 只做 accept/claim 两条幂等请求，不跑任何行为链路；分钟级开销可忽略。
+		TaskSweepEnabled bool `json:"task_sweep_enabled"` // 缺省 true；false = 关闭
+		TaskSweepMinutes int  `json:"task_sweep_minutes"` // 缺省 15；<=0 回落 15
 	} `json:"schedule"`
 
 	Global struct {
@@ -223,6 +230,7 @@ type Config struct {
 	SessionTTL             time.Duration `json:"-"`
 	SessionGCInterval      time.Duration `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
+	TaskSweepInterval      time.Duration `json:"-"` // 0 = 不启动（task_sweep_enabled=false）
 	ExpiringSoonDur        time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
@@ -264,6 +272,8 @@ func Default() *Config {
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	c.Schedule.TaskSweepEnabled = true
+	c.Schedule.TaskSweepMinutes = 15
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0
@@ -590,6 +600,13 @@ func (c *Config) normalize() error {
 			c.Schedule.BalanceRefreshMinutes = 5
 		}
 		c.BalanceRefreshInterval = time.Duration(c.Schedule.BalanceRefreshMinutes) * time.Minute
+	}
+	// 任务补领清扫：启用时 minutes<=0 回落默认 15；关闭时 interval 保持 0（不启动）。
+	if c.Schedule.TaskSweepEnabled {
+		if c.Schedule.TaskSweepMinutes <= 0 {
+			c.Schedule.TaskSweepMinutes = 15
+		}
+		c.TaskSweepInterval = time.Duration(c.Schedule.TaskSweepMinutes) * time.Minute
 	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err

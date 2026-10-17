@@ -963,6 +963,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                 <span class="hint">每日到点自动「扫描 + 执行全部待办」（Sequential 任务链零点解锁后自动推进，建议零点后）</span></label>
             </div>
             <div class="hr"></div>
+            <div class="grid2">
+              <div class="switch"><span class="lb">任务补领清扫</span>
+                <input type="checkbox" name="task_sweep_enabled" checked></div>
+              <label class="fld"><span class="lb">清扫间隔（分钟）</span>
+                <input name="task_sweep_minutes" type="number" min="1" placeholder="15"></label>
+            </div>
+            <div class="hint">周期扫描全部账号，把「进度已达标但尚未领奖」的成长任务补领掉（不含自动动作的口令任务也能领），并顺带接受未接受的任务。只发 accept / claim 两条<b>幂等</b>请求，不跑任何对话或上报行为，开销可忽略。<br>用途：真实对话点亮的任务不在自动动作白名单里，成长队列与「一键完成」都不会去领它——积分因此卡在半路上不去（#174）。</div>
+            <div class="hr"></div>
             <div class="switch"><span class="lb">保号任务覆盖已禁用账号</span>
               <input type="checkbox" name="include_disabled_in_tasks"></div>
             <div class="hint">禁用只关选号：打开后已禁用的账号仍会签到 / 活跃上报 / 保活 / 刷新余额（依旧不参与选号）。适合「一次只放开一个账号、用禁用做流量开关」的轮换养号用法，默认关闭。<br>若只想让<b>单个</b>账号临时退出选号但保留保号，直接用账号行的「<b>暂停选号</b>」按钮（账号级，无需打开本开关）。</div>
