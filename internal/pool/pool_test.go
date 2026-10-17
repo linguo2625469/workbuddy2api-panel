@@ -327,6 +327,28 @@ func TestDisablePersists(t *testing.T) {
 	}
 }
 
+// issue #171 问题一：软冷却到期后 until/coolKind/reason 字段按设计不清理，
+// statusOf 不应再把过期 reason 透出给面板（避免「可用」旁挂着历史 429）。
+func TestStatusReasonHiddenAfterCooldownExpires(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	// 冷却中：reason 正常透出。
+	p.Cooldown("u1", CoolSoft, time.Hour, "429 rate limit")
+	st, ok := p.Status("u1")
+	if !ok || !st.Cooling || st.Reason != "429 rate limit" {
+		t.Fatalf("cooling status=%+v ok=%v", st, ok)
+	}
+	// 冷却到期、字段残留（NoteSuccess 不碰 until/coolKind/reason）：不再透出。
+	p.Cooldown("u1", CoolSoft, -time.Minute, "429 rate limit")
+	st, ok = p.Status("u1")
+	if !ok || st.Cooling {
+		t.Fatalf("expired cooldown should not be cooling: %+v", st)
+	}
+	if st.Reason != "" {
+		t.Fatalf("expired cooldown reason leaked to status: %q", st.Reason)
+	}
+}
+
 func TestReenableIfCredits(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
