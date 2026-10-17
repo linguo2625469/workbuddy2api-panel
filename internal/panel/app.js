@@ -514,9 +514,11 @@ async function loadOverview(quiet) {
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || []);
     renderModelLocks(d.model_locks);
-    // 到期卡片跟随首页统计同步刷新（用同一份响应里的到期快照，不额外发请求）。
-    // 已有逐包明细缓存时不再覆盖——明细信息量更大，别把它降级成快照。
-    if ($('expBox') && !lastPackages) renderExpirySnapshot(d);
+    // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
+    // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
+    // 「检查」之后卡片永远停在那一刻的旧数据。
+    const liveFresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
+    if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
@@ -2788,8 +2790,11 @@ function expDaysLeft(dateStr, today) {
   return Math.round((new Date(dateStr + 'T00:00:00') - today) / 86400000);
 }
 
-function renderExpiry(d) {
-  const list = (d.accounts || []);
+// expiryRowsHtml 到期提醒的逐账号行渲染。**「检查」与首页快照共用这一个函数**，
+// 保证两条数据路径（逐包明细 / state 里的按日批次）输出完全一致：排序、今天/明天
+// 文案、日均需耗、7 天内合计、随后批次都只有一份实现。
+// list 每项形态：{ uid, nickname, packages:[{end_time, remain}], error? }。
+function expiryRowsHtml(list) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   // 按「最近到期」升序排（issue #125）。
   //
@@ -2809,21 +2814,29 @@ function renderExpiry(d) {
     return { a, key };
   });
   keyed.sort((x, y) => {
-    if (x.key === y.key) return 0;
-    if (x.key === null) return 1;
-    if (y.key === null) return -1;
-    return x.key < y.key ? -1 : 1;
+    if (x.key !== y.key) {
+      if (x.key === null) return 1;
+      if (y.key === null) return -1;
+      return x.key < y.key ? -1 : 1;
+    }
+    if (x.key === null) return 0;
+    // 同日到期的账号按昵称/uid 兜底排序：两条数据路径（检查的余额降序、
+    // overview 的 uid 升序）输入顺序不同，加固定 tie-break 才能保证输出一致。
+    const ax = String(x.a.nickname || x.a.uid || '');
+    const ay = String(y.a.nickname || y.a.uid || '');
+    return ax < ay ? -1 : ax > ay ? 1 : 0;
   });
-  const rows = keyed.map(({ a }) => {
+  return keyed.map(({ a }) => {
+    const name = a.nickname || String(a.uid || '').slice(0, 8);
     if (a.error) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-nm">' + esc(name) + '</span>' +
         '<span class="exp-main err">查询失败：' + esc(a.error) + '</span></div>';
     }
     const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
     if (!bs.length) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-nm">' + esc(name) + '</span>' +
         '<span class="exp-main">7 天内无到期积分</span></div>';
     }
     const first = bs[0];
@@ -2840,7 +2853,7 @@ function renderExpiry(d) {
     const rest = bs.slice(1, 4).map(b =>
       '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+      '<span class="exp-nm">' + esc(name) + '</span>' +
       '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
       '）· 该批 <b>' + fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
       fmtTok(daily) + '</b>' +
@@ -2848,6 +2861,11 @@ function renderExpiry(d) {
       (rest ? '<div class="note">' + rest + '</div>' : '') +
       '</span></div>';
   }).join('');
+}
+
+function renderExpiry(d) {
+  const list = (d.accounts || []);
+  const rows = expiryRowsHtml(list);
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
   // 数据新鲜度透明化：走缓存时标注年龄，免得把旧数据误当实时。
   const ageMin = lastPackages ? Math.floor((Date.now() - lastPackagesAt) / 60000) : 0;
@@ -2857,15 +2875,47 @@ function renderExpiry(d) {
   $('expBox').hidden = false;
 }
 
-/* 快照版到期提醒：不查上游，直接用 /overview 已有的 credits_earliest_expiry /
-   credits_earliest_remaining（由签到与余额后台刷新写入 state.json，默认每 5 分钟
-   更新一次）。打开面板即可看到「最近哪批要过期」，成本与首页统计条相同为零。
+/* 快照版到期提醒：不查上游，直接用 /overview 里的 credits_expiry_buckets。
+   后端每次余额刷新（默认每 5 分钟）按自然日聚合并写入 state.json，口径与
+   「检查」的逐包按日汇总完全相同；这里把批次还原成 packages 形态后直接复用
+   expiryRowsHtml，因此排序/今天明天/日均需耗/7 天内合计/随后批次全部一致。
 
-   与 renderExpiry（逐包明细版）的差异：这里只有**最早一批**的日期与数量，没有
-   后续批次、也没法算「7 天内合计」——那是 packages 接口才有的信息。因此卡片上
-   保留「检查」按钮作为增强入口，用户想要完整明细再显式触发一次上游查询。 */
+   旧 state（升级后尚未跑过一轮余额刷新，或 Redis 快照来自旧版本）没有 buckets，
+   退回只显示最早一批，保证卡片不空白；下一轮刷新后自动变成完整视图。 */
 function renderExpirySnapshot(d) {
   const list = (d && d.accounts) || [];
+  const hasBuckets = list.some(a => Array.isArray(a.credits_expiry_buckets) && a.credits_expiry_buckets.length);
+  if (hasBuckets) {
+    const isoDay = v => {
+      const dt = new Date(v);
+      if (isNaN(dt.getTime())) return '';
+      const p2 = n => String(n).padStart(2, '0');
+      return dt.getFullYear() + '-' + p2(dt.getMonth() + 1) + '-' + p2(dt.getDate());
+    };
+    // 逐账号取批次；升级过渡期/单号刷新失败的账号可能还没有 buckets，用旧的
+    // 「最早一批」字段兜底，避免在同一次渲染里被误报成「无到期」。
+    const packagesOf = a => {
+      const bs = a.credits_expiry_buckets || [];
+      if (bs.length) {
+        return bs.map(b => ({ end_time: (b.date || '') + 'T00:00:00', remain: b.remain }));
+      }
+      const day = isoDay(a.credits_earliest_expiry);
+      return (day && a.credits_earliest_remaining)
+        ? [{ end_time: day + 'T00:00:00', remain: a.credits_earliest_remaining }]
+        : [];
+    };
+    renderExpiry({
+      accounts: list.map(a => ({
+        uid: a.uid,
+        nickname: a.nickname,
+        realm: a.realm,
+        packages: packagesOf(a),
+      })),
+    });
+    $('expNote').textContent = snapshotNoteText(list.length, d);
+    return;
+  }
+  // 旧 state 兜底：只有最早一批的日期与数量。
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const keyed = list.map(a => {
     // 后端给的是 RFC3339 带时区；无到期信息（长期包/未刷新）的账号排在最后。
@@ -2889,12 +2939,16 @@ function renderExpirySnapshot(d) {
         '<span class="exp-nm">' + nm + '</span>' +
         '<span class="exp-main">无近期到期批次</span></div>';
     }
-    const days = Math.max(0, Math.ceil((ms - today.getTime()) / 86400000));
+    // 与 expDaysLeft 同口径：按本地自然日算，而不是对精确时间戳 ceil（后者会把
+    // 明天/今天各多算一天，日均需耗也随之少一半）。
+    const dt = new Date(ms);
+    const p2 = n => String(n).padStart(2, '0');
+    const when = dt.getFullYear() + '-' + p2(dt.getMonth() + 1) + '-' + p2(dt.getDate());
+    const days = Math.max(0, Math.round((new Date(when + 'T00:00:00') - today) / 86400000));
     const remain = Number(a.credits_earliest_remaining || 0);
     const daily = Math.ceil(remain / Math.max(1, days));
     const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
     const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
-    const when = new Date(ms).toISOString().slice(0, 10);
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
       '<span class="exp-nm">' + nm + '</span>' +
       '<span class="exp-main">最近到期 <b>' + esc(when) + '</b>（' + dayWord +
@@ -2904,8 +2958,27 @@ function renderExpirySnapshot(d) {
       '</span></div>';
   }).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
-  $('expNote').textContent = list.length + ' 个账号 · 快照（来自本地状态，点「检查」拉实时明细）';
+  $('expNote').textContent = snapshotNoteText(list.length, d);
   $('expBox').hidden = false;
+}
+
+// snapshotNoteText 快照卡片的数据新鲜度标注。界面本身 5 秒轮询一次，但卡片数据
+// 只随余额后台刷新更新（默认每 5 分钟）——不标出来的话，5 秒级的界面刷新会让人
+// 误以为数据也是 5 秒级新鲜。放在 renderExpirySnapshot 之后：前端 harness 按
+// 「renderExpirySnapshot 起」切片求值，函数声明提升让它在同一切片内可用。
+function snapshotNoteText(count, d) {
+  const iv = Number(d && d.balance_refresh_sec) || 0;
+  const at = d && d.balance_refreshed_at ? new Date(d.balance_refreshed_at).getTime() : 0;
+  if (iv <= 0) {
+    return count + ' 个账号 · 快照（来自本地状态 · 未开启后台刷新，点「检查」拉实时明细）';
+  }
+  const every = iv % 60 === 0 ? iv / 60 + ' 分钟' : iv + ' 秒';
+  let tail = '每 ' + every + '后台刷新';
+  if (at && !isNaN(at)) {
+    const min = Math.floor((Date.now() - at) / 60000);
+    tail += '，' + (min < 1 ? '刚刚更新' : min + ' 分钟前更新');
+  }
+  return count + ' 个账号 · 快照（' + tail + '，点「检查」拉实时明细）';
 }
 
 async function loadExpiry(force) {

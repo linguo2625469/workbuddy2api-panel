@@ -1845,6 +1845,60 @@ func TestCreditExpirySnapshotConsumptionAndClear(t *testing.T) {
 	}
 }
 
+// TestExpiryBucketsFEFOAndPersistence 钉住按日到期批次的三件事：
+//  1. 最早批次以 buckets 为准（同日多包合计已在写入前完成），而不是入参单批值；
+//  2. 两次余额刷新之间按 FEFO 扣减，扣穿第一桶后最早批次顺延到下一桶；
+//  3. state.json / Redis 快照往返不丢批次，重启后首页快照仍与「检查」同口径。
+func TestExpiryBucketsFEFOAndPersistence(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	now := time.Now()
+	at1 := now.Add(24 * time.Hour)
+	at2 := now.Add(48 * time.Hour)
+	p.SetCreditsSnapshot("u1", CreditsSnapshot{
+		Remain: 300, Total: 300, Expiring: 100,
+		// 故意给一个与 buckets 不一致的最早值：buckets 必须优先。
+		EarliestAt: at1, EarliestRemaining: 999,
+		ExpiryBuckets: []ExpiryBucket{
+			{Date: at1.Format("2006-01-02"), ExpireAt: at1, Remain: 100},
+			{Date: at2.Format("2006-01-02"), ExpireAt: at2, Remain: 200},
+		},
+	})
+	st, _ := p.Status("u1")
+	if len(st.CreditsExpiryBuckets) != 2 || st.CreditsEarliestRemaining != 100 || !st.CreditsEarliestExpiry.Equal(at1) {
+		t.Fatalf("initial buckets=%+v earliest=%v/%d", st.CreditsExpiryBuckets, st.CreditsEarliestExpiry, st.CreditsEarliestRemaining)
+	}
+
+	// 扣 150：第一桶扣穿（100），第二桶剩 150，最早批次顺延到 at2。
+	p.NoteModelCost("u1", "m", 150, 1000)
+	st, _ = p.Status("u1")
+	if st.Credits != 150 || len(st.CreditsExpiryBuckets) != 1 || st.CreditsExpiryBuckets[0].Remain != 150 {
+		t.Fatalf("after consume buckets=%+v credits=%d", st.CreditsExpiryBuckets, st.Credits)
+	}
+	if !st.CreditsEarliestExpiry.Equal(at2) || st.CreditsEarliestRemaining != 150 {
+		t.Fatalf("earliest after consume=%v/%d want %v/150", st.CreditsEarliestExpiry, st.CreditsEarliestRemaining, at2)
+	}
+
+	// 持久化往返。
+	p.mu.Lock()
+	sf := p.stateOverviewLocked()
+	p.mu.Unlock()
+	if got := sf.Accounts["u1"].CreditsExpiryBuckets; len(got) != 1 || got[0].Remain != 150 {
+		t.Fatalf("persisted buckets=%+v", got)
+	}
+	p2 := New("")
+	p2.mu.Lock()
+	p2.applyAccountsLocked(sf.Accounts)
+	p2.mu.Unlock()
+	st2, ok := p2.Status("u1")
+	if !ok || len(st2.CreditsExpiryBuckets) != 1 || st2.CreditsExpiryBuckets[0].Remain != 150 {
+		t.Fatalf("restored buckets=%+v", st2.CreditsExpiryBuckets)
+	}
+	if !st2.CreditsEarliestExpiry.Equal(at2) || st2.CreditsEarliestRemaining != 150 {
+		t.Fatalf("restored earliest=%v/%d", st2.CreditsEarliestExpiry, st2.CreditsEarliestRemaining)
+	}
+}
+
 // ---------- 暂停选号（paused）----------
 //
 // paused 与 disabled 正交：两者都退出选号候选，但 paused 是「临时让位」——

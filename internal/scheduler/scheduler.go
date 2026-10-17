@@ -82,6 +82,11 @@ type Scheduler struct {
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
 	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
 	balanceInterval atomic.Int64
+
+	// lastBalanceRefresh 最近一次后台余额刷新的完成时刻（Unix 纳秒，0=尚未跑过）。
+	// 供面板「到期提醒」标注数据年龄：卡片展示的是这份快照，必须让年龄可读，
+	// 否则界面 5 秒轮询会让人误以为数据也是 5 秒级新鲜。
+	lastBalanceRefresh atomic.Int64
 }
 
 // New 构建。
@@ -485,14 +490,22 @@ func (s *Scheduler) RunCheckinNow() {
 				log.Printf("checkin %s: 签到成功", logfmt.Label(st.UID, st.Nickname))
 			}
 		}
-		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次。
-		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
+		// 分桶查余额：配置窗口内的积分单独标记，同时记录最早未来到期批次与
+		// 按自然日聚合的全部批次（首页快照与「检查」共用同一口径）。
+		remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			continue
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
-		s.cfg.Pool.SetCreditsDetailed(st.UID, remain, total, expiring, earliestAt, earliestRemaining)
+		s.cfg.Pool.SetCreditsSnapshot(st.UID, pool.CreditsSnapshot{
+			Remain:            remain,
+			Total:             total,
+			Expiring:          expiring,
+			EarliestAt:        earliestAt,
+			EarliestRemaining: earliestRemaining,
+			ExpiryBuckets:     poolExpiryBuckets(buckets),
+		})
 	}
 	s.RunStreakBonusNow()
 }
@@ -604,6 +617,19 @@ func (s *Scheduler) RunKeepaliveNow() {
 	}
 }
 
+// poolExpiryBuckets 把 upstream 的按日到期批次转换为 pool 结构。两个包字段同构，
+// 手工转换是为了不让底层 pool 反向依赖 upstream。
+func poolExpiryBuckets(in []upstream.ExpiryBucket) []pool.ExpiryBucket {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]pool.ExpiryBucket, len(in))
+	for i, b := range in {
+		out[i] = pool.ExpiryBucket{Date: b.Date, ExpireAt: b.ExpireAt, Remain: b.Remain}
+	}
+	return out
+}
+
 // RunBalanceRefreshNow 并发查询余额并更新池内 credits。
 // 账号范围：默认跳过禁用账号；schedule.include_disabled_in_tasks 打开时一并刷新
 // （轮换用法下据此判断下一个该启用谁）。注意 ReenableIfCredits 对 disabled 是
@@ -626,16 +652,24 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		wg.Add(1)
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
-			remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
+			remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
 				return
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)
-			s.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
-		}(a, st.UID)
+			s.cfg.Pool.SetCreditsSnapshot(uid, pool.CreditsSnapshot{
+				Remain:            remain,
+				Total:             total,
+				Expiring:          expiring,
+				EarliestAt:        earliestAt,
+				EarliestRemaining: earliestRemaining,
+				ExpiryBuckets:     poolExpiryBuckets(buckets),
+			})
+			}(a, st.UID)
 	}
 	wg.Wait()
+	s.lastBalanceRefresh.Store(time.Now().UnixNano())
 }
 
 // StartBalanceRefresh 后台周期性余额刷新（独立 ticker goroutine，ctx 取消即停）。
@@ -648,6 +682,10 @@ func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Durat
 	}
 	s.balanceInterval.Store(int64(interval))
 	go func() {
+		// 启动即刷一轮：进程重启（含升级到带按日批次的版本）后旧 state 可能没有
+		// credits_expiry_buckets；不等第一个 ticker，首页快照就能拿到与「检查」
+		// 同口径的完整数据，避免升级后前 5 分钟仍显示旧口径。
+		s.RunBalanceRefreshNow()
 		var logged time.Duration
 		for {
 			cur := time.Duration(s.balanceInterval.Load())
@@ -685,4 +723,18 @@ func (s *Scheduler) SetBalanceInterval(d time.Duration) {
 	}
 	s.balanceInterval.Store(int64(d))
 	poke(s.rearmBalance)
+}
+
+// BalanceInterval 当前余额后台刷新间隔（0=暂停）。面板 overview 据此告诉用户
+// 「到期提醒」卡片的数据节奏，而不是让 5 秒界面轮询冒充数据新鲜度。
+func (s *Scheduler) BalanceInterval() time.Duration {
+	return time.Duration(s.balanceInterval.Load())
+}
+
+// BalanceRefreshedAt 最近一次后台余额刷新的完成时刻（零值 = 尚未跑过）。
+func (s *Scheduler) BalanceRefreshedAt() time.Time {
+	if v := s.lastBalanceRefresh.Load(); v != 0 {
+		return time.Unix(0, v)
+	}
+	return time.Time{}
 }

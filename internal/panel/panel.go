@@ -224,6 +224,19 @@ func (p *Panel) expiringSoonWindow() time.Duration {
 	return p.cfg.Scheduler.ExpiringSoonWindow()
 }
 
+// poolExpiryBuckets 把 upstream 的按日到期批次转换为 pool 结构。两个包字段同构，
+// 手工转换是为了不让底层 pool 反向依赖 upstream。
+func poolExpiryBuckets(in []upstream.ExpiryBucket) []pool.ExpiryBucket {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]pool.ExpiryBucket, len(in))
+	for i, b := range in {
+		out[i] = pool.ExpiryBucket{Date: b.Date, ExpireAt: b.ExpireAt, Remain: b.Remain}
+	}
+	return out
+}
+
 // ---------------------------------------------------------------------------
 // 只读接口
 // ---------------------------------------------------------------------------
@@ -253,7 +266,27 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
+		// 到期提醒快照的节奏与年龄：界面轮询是 5 秒级，但卡片数据只随余额后台刷新
+		// 更新（默认每 5 分钟）——把这两个数透出，前端才能如实标注「x 分钟前更新」。
+		"balance_refresh_sec":    p.balanceRefreshSec(),
+		"balance_refreshed_at":   p.balanceRefreshedAt(),
 	})
+}
+
+// balanceRefreshSec 余额后台刷新间隔（秒）；无调度器/未开启时为 0。
+func (p *Panel) balanceRefreshSec() int {
+	if p.cfg.Scheduler == nil {
+		return 0
+	}
+	return int(p.cfg.Scheduler.BalanceInterval() / time.Second)
+}
+
+// balanceRefreshedAt 最近一次后台余额刷新完成时刻；无调度器或尚未跑过为零值。
+func (p *Panel) balanceRefreshedAt() time.Time {
+	if p.cfg.Scheduler == nil {
+		return time.Time{}
+	}
+	return p.cfg.Scheduler.BalanceRefreshedAt()
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
@@ -540,14 +573,21 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
-	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
+	remain, total, expiring, earliestAt, earliestRemaining, buckets, err := p.cfg.Upstream.UserResourceSnapshot(a, p.expiringSoonWindow())
 	if err != nil {
 		resp["balance_error"] = err.Error()
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	p.cfg.Pool.ReenableIfCredits(uid, remain, total)
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
+	p.cfg.Pool.SetCreditsSnapshot(uid, pool.CreditsSnapshot{
+		Remain:            remain,
+		Total:             total,
+		Expiring:          expiring,
+		EarliestAt:        earliestAt,
+		EarliestRemaining: earliestRemaining,
+		ExpiryBuckets:     poolExpiryBuckets(buckets),
+	})
 	resp["credits"] = remain
 	resp["credits_total"] = total
 	log.Printf("panel: checkin uid=%s msg=%q credits=%d/%d", uid, checkinMsg, remain, total)
@@ -562,12 +602,19 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
+	remain, total, expiring, earliestAt, earliestRemaining, buckets, err := p.cfg.Upstream.UserResourceSnapshot(a, p.expiringSoonWindow())
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}
-	p.cfg.Pool.SetCreditsDetailed(uid, remain, total, expiring, earliestAt, earliestRemaining)
+	p.cfg.Pool.SetCreditsSnapshot(uid, pool.CreditsSnapshot{
+		Remain:            remain,
+		Total:             total,
+		Expiring:          expiring,
+		EarliestAt:        earliestAt,
+		EarliestRemaining: earliestRemaining,
+		ExpiryBuckets:     poolExpiryBuckets(buckets),
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "credits": remain, "credits_total": total})
 }
 

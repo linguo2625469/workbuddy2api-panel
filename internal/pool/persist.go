@@ -176,6 +176,13 @@ func (p *Pool) applyAccountsLocked(accounts map[string]stateAccount) {
 			e.creditsEarliestExpiry = time.Time{}
 			e.creditsEarliestRemaining = 0
 		}
+		// 按日到期批次：惰性剔除已过期/零剩余条目；有批次时以批次为准同步最早批次，
+		// 保证重启后首页快照与「检查」仍同口径。
+		e.expiryBuckets = sanitizeExpiryBuckets(s.CreditsExpiryBuckets, now)
+		if len(e.expiryBuckets) > 0 {
+			e.creditsEarliestExpiry = e.expiryBuckets[0].ExpireAt
+			e.creditsEarliestRemaining = e.expiryBuckets[0].Remain
+		}
 		// 熔断器持久化恢复：breakerUntil 未过期才恢复（过期不复活），retryCount 仅在
 		// 熔断仍有效时保留（否则归零，不保留无用退避指数）。
 		if s.BreakerUntil != nil && now.Before(*s.BreakerUntil) {
@@ -303,6 +310,7 @@ func (p *Pool) stateOverviewLocked() stateFile {
 			CreditsExpiring:          e.creditsExpiring,
 			CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 			CreditsEarliestRemaining: e.creditsEarliestRemaining,
+			CreditsExpiryBuckets:     append([]ExpiryBucket(nil), e.expiryBuckets...),
 		}
 		// 熔断截止：仅未过期才落盘（指针 nil 才能被 omitempty 真省略）。
 		if !e.breakerUntil.IsZero() && now.Before(e.breakerUntil) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -930,6 +931,70 @@ func TestCreditPackagesExpiryTimestamp(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("gift pack missing Unix-ms expiry: %+v", packs)
+	}
+}
+
+// TestUserResourceSnapshotDeductionEndTime 钉住快照与「检查」同口径：
+//  1. 体验版包必须用 DeductionEndTime（真失效时刻），不能把 CycleEndTime（周期
+//     重置日）当成到期日——线上表现就是 10-31 错报、实际 2035 年才失效；
+//  2. 同一天多个包要合并成一个自然日批次，earliestRemaining 是该日合计；
+//  3. CreditPackages（检查）与 UserResourceSnapshot（首页快照）对同一个包给出
+//     同一个失效时刻。
+func TestUserResourceSnapshotDeductionEndTime(t *testing.T) {
+	now := time.Now().In(softRateResetLoc)
+	today := now
+	day2 := time.Date(today.Year(), today.Month(), today.Day()+2, 9, 0, 0, 0, softRateResetLoc)
+	day2Later := day2.Add(3 * time.Hour) // 同一天 12:00
+	cycleOnly := day2.Add(14 * 24 * time.Hour)
+	far := time.Date(today.Year()+9, today.Month(), today.Day(), 9, 0, 0, 0, softRateResetLoc)
+	payload := `{"code":0,"data":{"Response":{"Data":{"Accounts":[` +
+		`{"PackageName":"gift-a","CycleCapacitySize":100,"CycleCapacityRemain":100,"CycleEndTime":"` + day2.Format(packageEndLayout) + `"},` +
+		`{"PackageName":"gift-b","CycleCapacitySize":50,"CycleCapacityRemain":50,"CycleEndTime":"` + day2Later.Format(packageEndLayout) + `"},` +
+		`{"PackageName":"experience","CycleCapacitySize":500,"CycleCapacityRemain":488,"CycleEndTime":"` +
+		cycleOnly.Format(packageEndLayout) + `","DeductionEndTime":` + strconv.FormatInt(far.UnixMilli(), 10) + `}` +
+		`]}}}}`
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(r.URL.Path, "/v2/billing/meter/get-user-resource") {
+			return nil, errors.New("wrong path: " + r.URL.Path)
+		}
+		return jsonResp(200, payload), nil
+	})
+
+	remain, total, expiring, earliestAt, earliestRemaining, buckets, err := c.UserResourceSnapshot(
+		&auth.Auth{AccessToken: "at", UID: "u1"}, 72*time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if remain != 638 || total != 650 {
+		t.Fatalf("remain/total=%d/%d want 638/650", remain, total)
+	}
+	// 体验版不在 72h 窗口内；只有 day2 的两个包计入。
+	if expiring != 150 {
+		t.Fatalf("expiring=%d want 150", expiring)
+	}
+	if !earliestAt.Equal(day2) || earliestRemaining != 150 {
+		t.Fatalf("earliest=%v/%d want %v/150（同日两包应合计）", earliestAt, earliestRemaining, day2)
+	}
+	if len(buckets) != 2 {
+		t.Fatalf("buckets=%+v want 2 个自然日", buckets)
+	}
+	day := day2.In(softRateResetLoc).Format("2006-01-02")
+	if buckets[0].Date != day || buckets[0].Remain != 150 || !buckets[0].ExpireAt.Equal(day2) {
+		t.Fatalf("bucket[0]=%+v want date=%s remain=150 expire=%v", buckets[0], day, day2)
+	}
+	if buckets[1].Remain != 488 || !buckets[1].ExpireAt.Equal(far) {
+		t.Fatalf("experience bucket=%+v want remain=488 expire=%v（不是 CycleEndTime %v）", buckets[1], far, cycleOnly)
+	}
+
+	packs, _, _, err := c.CreditPackages(&auth.Auth{AccessToken: "at", UID: "u1"})
+	if err != nil {
+		t.Fatalf("packages: %v", err)
+	}
+	for _, p := range packs {
+		if p.Name == "experience" && p.ExpiresAt != far.UnixMilli() {
+			t.Fatalf("CreditPackages experience expires_at=%d want %d（两条路径必须同口径）", p.ExpiresAt, far.UnixMilli())
+		}
 	}
 }
 

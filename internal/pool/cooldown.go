@@ -5,6 +5,7 @@ package pool
 
 import (
 	"log"
+	"sort"
 	"strings"
 	"time"
 )
@@ -63,40 +64,106 @@ func (p *Pool) NoteCheckinDone(uid string) {
 	}
 }
 
-// SetCreditsDetailed 更新账号余额/总额、配置窗口内的快过架子集，以及最早未来
-// 到期批次。earliestAt 为零或不在未来时清空最早批次；expiring/earliestRemaining
-// 均钳到 [0, credits]，避免上游脏数据污染选号。
-func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, earliestAt time.Time, earliestRemaining int64) {
+// CreditsSnapshot 一次余额查询的完整结果（含按日到期批次）。
+// 调度器/面板把 upstream.UserResourceSnapshot 的输出转换成本结构后写入池。
+type CreditsSnapshot struct {
+	Remain            int64
+	Total             int64
+	Expiring          int64
+	EarliestAt        time.Time
+	EarliestRemaining int64
+	ExpiryBuckets     []ExpiryBucket
+}
+
+// SetCreditsSnapshot 更新账号余额/总额、窗口内快过期子集、最早到期批次与按日到期批次。
+// 有 buckets 时以 buckets 为准重算最早批次（同一天多个包合计）；无 buckets 时沿用
+// 入参 earliestAt/earliestRemaining（兼容旧调用与测试）。所有数值钳到 [0, credits]，
+// 避免上游脏数据污染选号。
+func (p *Pool) SetCreditsSnapshot(uid string, s CreditsSnapshot) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if e, ok := p.byUID[uid]; ok {
-		if credits < 0 {
-			credits = 0
-		}
-		if expiring < 0 {
-			expiring = 0
-		}
-		if expiring > credits {
-			expiring = credits
-		}
-		now := time.Now()
-		if earliestRemaining < 0 {
-			earliestRemaining = 0
-		}
-		if earliestRemaining > credits {
-			earliestRemaining = credits
-		}
-		if earliestAt.IsZero() || !earliestAt.After(now) || earliestRemaining == 0 {
-			earliestAt = time.Time{}
-			earliestRemaining = 0
-		}
-		e.credits = credits
-		e.creditsTotal = total
-		e.creditsExpiring = expiring
-		e.creditsEarliestExpiry = earliestAt
-		e.creditsEarliestRemaining = earliestRemaining
-		p.dirty.Store(true)
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
 	}
+	credits := s.Remain
+	if credits < 0 {
+		credits = 0
+	}
+	expiring := s.Expiring
+	if expiring < 0 {
+		expiring = 0
+	}
+	if expiring > credits {
+		expiring = credits
+	}
+	now := time.Now()
+	buckets := sanitizeExpiryBuckets(s.ExpiryBuckets, now)
+	earliestAt, earliestRemaining := s.EarliestAt, s.EarliestRemaining
+	if len(buckets) > 0 {
+		earliestAt = buckets[0].ExpireAt
+		earliestRemaining = buckets[0].Remain
+	}
+	if earliestRemaining < 0 {
+		earliestRemaining = 0
+	}
+	if earliestRemaining > credits {
+		earliestRemaining = credits
+	}
+	if earliestAt.IsZero() || !earliestAt.After(now) || earliestRemaining == 0 {
+		earliestAt = time.Time{}
+		earliestRemaining = 0
+	}
+	e.credits = credits
+	e.creditsTotal = s.Total
+	e.creditsExpiring = expiring
+	e.creditsEarliestExpiry = earliestAt
+	e.creditsEarliestRemaining = earliestRemaining
+	e.expiryBuckets = buckets
+	p.dirty.Store(true)
+}
+
+// SetCreditsDetailed 旧入口：只有聚合余额与最早一批，没有按日批次。
+// 保留给测试与只关心最早批次的调用方；生产路径统一走 SetCreditsSnapshot。
+func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, earliestAt time.Time, earliestRemaining int64) {
+	p.SetCreditsSnapshot(uid, CreditsSnapshot{
+		Remain:            credits,
+		Total:             total,
+		Expiring:          expiring,
+		EarliestAt:        earliestAt,
+		EarliestRemaining: earliestRemaining,
+	})
+}
+
+// sanitizeExpiryBuckets 深拷贝并清洗：只保留有日期、未过期、正剩余的桶，按日期升序。
+// ExpireAt 缺失时按日期补当天 00:00（本地时区），保证排序与最早批次仍可用。
+func sanitizeExpiryBuckets(in []ExpiryBucket, now time.Time) []ExpiryBucket {
+	if len(in) == 0 {
+		return nil
+	}
+	today := now.Format("2006-01-02")
+	out := make([]ExpiryBucket, 0, len(in))
+	for _, b := range in {
+		if b.Remain <= 0 || b.Date == "" || b.Date < today {
+			continue
+		}
+		if b.ExpireAt.IsZero() {
+			if t, err := time.ParseInLocation("2006-01-02", b.Date, time.Local); err == nil {
+				b.ExpireAt = t
+			}
+		}
+		if b.ExpireAt.IsZero() || !b.ExpireAt.After(now) {
+			continue
+		}
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Date != out[j].Date {
+			return out[i].Date < out[j].Date
+		}
+		return out[i].ExpireAt.Before(out[j].ExpireAt)
+	})
+	return out
 }
 
 // ClearExpiringSnapshots 清空所有账号的快过期/最早到期缓存。配置窗口改变时调用，

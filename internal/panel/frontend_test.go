@@ -914,6 +914,157 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// TestAppJSExpirySnapshotMatchesLive 钉住「打开面板看到的」与「点检查后看到的」逐字节
+// 一致（issue：首页快照与检查用了两套到期口径）。
+//
+// 做法：给同一逻辑数据的两条形态——packages（检查）与 credits_expiry_buckets（overview
+// 快照）——分别渲染，比较 expList.innerHTML。相等意味着排序、日期、该批合计、日均
+// 需耗、7 天内合计、随后批次全部一致，而不是只对齐了某一个字段。
+func TestAppJSExpirySnapshotMatchesLive(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry parity test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function expBatches');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', children: [], textContent: '', hidden: true });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry; this.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const iso = n => {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
+  const p = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+};
+// 同一天多个包：检查侧是 3 + 100 + 80，快照侧已聚合成 180。
+const live = { accounts: [
+  { uid: 'a', nickname: '同日多批', packages: [
+    { end_time: iso(0) + 'T09:00:00', remain: 3 },
+    { end_time: iso(1) + 'T09:00:00', remain: 100 },
+    { end_time: iso(1) + 'T12:00:00', remain: 80 },
+    { end_time: iso(2) + 'T09:00:00', remain: 50 },
+  ] },
+  { uid: 'b', nickname: '远期', packages: [
+    { end_time: iso(16) + 'T22:25:00', remain: 1600 },
+    { end_time: iso(17) + 'T09:00:00', remain: 400 },
+  ] },
+  { uid: 'c', nickname: '无到期', packages: [] },
+  { uid: 'd', nickname: '明天', packages: [{ end_time: iso(1) + 'T10:00:00', remain: 77 }] },
+] };
+const snap = { accounts: [
+  { uid: 'b', nickname: '远期', credits_expiry_buckets: [
+    { date: iso(16), remain: 1600 },
+    { date: iso(17), remain: 400 },
+  ] },
+  { uid: 'a', nickname: '同日多批', credits_expiry_buckets: [
+    { date: iso(2), remain: 50 },
+    { date: iso(1), remain: 180 },
+    { date: iso(0), remain: 3 },
+  ] },
+  { uid: 'c', nickname: '无到期', credits_expiry_buckets: [] },
+  { uid: 'd', nickname: '明天', credits_expiry_buckets: [{ date: iso(1), remain: 77 }] },
+] };
+ctx.renderExpiry(live);
+const liveHTML = sinks['expList'].innerHTML;
+sinks['expList'].innerHTML = '';
+ctx.renderExpirySnapshot(snap);
+const snapHTML = sinks['expList'].innerHTML;
+process.stdout.write(JSON.stringify({
+  equal: liveHTML === snapHTML,
+  today: liveHTML.includes('今天到期'),
+  tomorrow: liveHTML.includes('明天到期'),
+  weekSum: liveHTML.includes('7 天内合计'),
+  len: liveHTML.length,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expparity-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry parity node test failed: %v\n%s", err, out)
+	}
+	const want = `{"equal":true,"today":true,"tomorrow":true,"weekSum":true,"len":`
+	got := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(got, want) {
+		t.Fatalf("expiry parity=%s\nwant prefix %s（快照与检查必须逐字节一致）", got, want)
+	}
+}
+
+// TestAppJSExpirySnapshotNoteCadence 到期卡片必须如实标注数据节奏与年龄。
+// 界面本身 5 秒轮询一次 overview，但卡片数据只随余额后台刷新更新（默认每 5 分钟）；
+// 不标注的话，5 秒级的界面刷新会让人误以为数据也是 5 秒级新鲜。
+func TestAppJSExpirySnapshotNoteCadence(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry note test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+// 从 expBatches 切起：renderExpirySnapshot 的按日批次分支要调 renderExpiry，
+// 只切它自己会 ReferenceError。
+const start = src.indexOf('function expBatches');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', children: [], textContent: '', hidden: true });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpirySnapshot = renderExpirySnapshot;', ctx);
+const refreshedAt = new Date(Date.now() - 3 * 60000).toISOString();
+ctx.renderExpirySnapshot({ accounts: [
+  { uid: 'a', nickname: 'n', credits_expiry_buckets: [{ date: '2099-01-01', remain: 1 }] },
+], balance_refresh_sec: 300, balance_refreshed_at: refreshedAt });
+const withCadence = sinks['expNote'].textContent;
+ctx.renderExpirySnapshot({ accounts: [
+  { uid: 'a', nickname: 'n', credits_expiry_buckets: [{ date: '2099-01-01', remain: 1 }] },
+] });
+const withoutCadence = sinks['expNote'].textContent;
+process.stdout.write(JSON.stringify({
+  cadence: withCadence.includes('每 5 分钟后台刷新') && withCadence.includes('3 分钟前更新'),
+  noCadence: withoutCadence.includes('未开启后台刷新'),
+  note: withCadence,
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "expnote-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry note node test failed: %v\n%s", err, out)
+	}
+	const want = `{"cadence":true,"noCadence":true,"note":`
+	if !strings.HasPrefix(strings.TrimSpace(string(out)), want) {
+		t.Fatalf("expiry note=%s\nwant prefix %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
 // TestPanelIndexExpiryBoxNotHidden 到期卡片在 HTML 骨架里不得带 hidden 属性（issue #137）。
 //
 // 与上一个用例互补：app.js 侧有 renderExpirySnapshot 兜底，HTML 侧若仍写死 hidden，
