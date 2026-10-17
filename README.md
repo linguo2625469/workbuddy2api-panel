@@ -64,6 +64,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
 | ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
 | 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
+| 🔍 **联网搜索** | `POST /v1/search/messages` 把上游 `/agenttool/v1/search` 包成 Anthropic Messages 兼容形态（DSH 等客户端的搜索 provider 零改动接入）；复用账号池选号 / 在途租约 / token 刷新 / 错误冷却，出站请求头对齐官方客户端 |
 | 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
 | 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
 | 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
@@ -344,6 +345,13 @@ curl -s http://localhost:7863/v1/chat/completions \
   -H "Authorization: Bearer your-api-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
+
+# 联网搜索（Anthropic Messages 兼容形态，走上游 /agenttool/v1/search）
+curl -s http://localhost:7863/v1/search/messages \
+  -H "Authorization: Bearer your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4-flash","tools":[{"type":"web_search_20250305","name":"web_search"}],
+       "messages":[{"role":"user","content":"Perform a web search for the query: OpenAI 最新模型"}]}'
 ```
 
 ## 配置说明
@@ -616,6 +624,72 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 - 失败隔离：单账号失败只跳过该账号当趟；401 不强刷（token 刷新交保活时点）
 
 ## API 端点
+
+### 联网搜索 `POST /v1/search/messages`
+
+把上游 `/agenttool/v1/search` 包成 **Anthropic Messages 兼容**的搜索端点。这样任何按
+`${baseURL}/messages` 发起搜索的客户端（如 DSH 的 `web-search-deepseek`）只需把搜索
+baseURL 指向 `<网关>/v1/search`，即可零代码接入本网关的搜索能力。
+
+与 chat 共享同一套账号池语义：选号轮转、在途租约、token 临近过期自动刷新、失败按错误
+类型冷却或熔断。
+
+**为什么不用 `/v1/messages`**：那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发；
+搜索挂在 `/v1/search/messages`，语义清晰且互不干扰。
+
+请求（Anthropic Messages 形态）：
+
+```json
+{
+  "model": "deepseek-v4-flash",
+  "max_tokens": 4096,
+  "tools": [{ "type": "web_search_20250305", "name": "web_search", "max_uses": 5 }],
+  "messages": [
+    { "role": "user", "content": [{ "type": "text", "text": "Perform a web search for the query: OpenAI 最新模型" }] }
+  ]
+}
+```
+
+- `tools` 必须声明 web_search（`type` 以 `web_search` 开头或 `name` 为 `web_search`），
+  否则返回 400——本端点只服务搜索，不处理模型对话
+- 搜索词取自 user 消息文本，固定前缀 `Perform a web search for the query:` 会被剥离
+- 结果条数固定为官方默认值 5（服务端实际上限约 10）
+
+响应为 Anthropic Messages 形态，搜索结果在 `web_search_tool_result` block 里：
+
+```json
+{
+  "id": "msg_wb2api_...",
+  "type": "message",
+  "role": "assistant",
+  "model": "deepseek-v4-flash",
+  "content": [
+    {
+      "type": "web_search_tool_result",
+      "tool_use_id": "srvtoolu_...",
+      "content": [
+        { "type": "web_search_result", "url": "https://...", "title": "..." }
+      ]
+    },
+    {
+      "type": "text",
+      "text": "",
+      "citations": [
+        { "type": "web_search_result_location", "url": "https://...", "cited_text": "摘要" }
+      ]
+    }
+  ],
+  "stop_reason": "end_turn",
+  "usage": { "input_tokens": 0, "output_tokens": 0 }
+}
+```
+
+> **摘要只走 citations**：Anthropic 的 `web_search_result` 本身不带摘要，摘要由 `text`
+> block 的 `citations[].cited_text` 承载（与官方行为一致）。
+>
+> **上游未实现的参数不要暴露给用户**：实测 `allowed_domains`、`freshness`、
+> `blocked_domains`（折成 `(-site:)` 拼进 query）在服务端均**静默失效**——传了不报错也
+> 不生效。本端点因此不接受这三个字段，避免调用方产生「已过滤」的错误预期。
 
 **余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
 

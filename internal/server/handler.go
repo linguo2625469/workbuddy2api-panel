@@ -136,6 +136,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// 联网搜索（Anthropic Messages 兼容形态，见 messages.go）。路径刻意不占用
+	// /v1/messages——那是 Anthropic 模型对话的标准路径，留给未来的 chat 转发。
+	h.mux.HandleFunc("POST /v1/search/messages", h.withAuth(h.messages))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
@@ -146,8 +149,13 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
-		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+	if h.cfg.RequestLog != nil && h.tracedRequest(r) {
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path}
+		if isSearchPath(r.URL.Path) {
+			// 搜索不是模型调用，但面板「模型」列空着无法区分这类流量；
+			// 用产品名标注（与 chat 的 model 字段并列展示）。
+			trace.model = searchToolLabel
+		}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
 		}
@@ -166,6 +174,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mux.ServeHTTP(w, r)
+}
+
+// tracedRequest 判断该请求是否需要请求日志记账（指标 + JSONL 归档）。
+//
+// 搜索与 chat 共用同一份账本：搜索同样消耗账号额度、同样会因上游/账号问题失败，
+// 不记账等于在面板「请求记录」里完全看不见搜索流量（此前正是如此——只挂
+// /v1/chat/completions 一个硬编码路径）。
+func (h *Handler) tracedRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return r.URL.Path == "/v1/chat/completions" || isSearchPath(r.URL.Path)
+}
+
+// isSearchPath 判断是否为搜索端点。
+func isSearchPath(path string) bool {
+	return path == "/v1/search/messages"
 }
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
