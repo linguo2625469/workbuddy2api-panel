@@ -215,6 +215,15 @@ var mpTaskCodes = map[string]bool{
 // isMPTaskCode 报告任务是否小程序口径专属（决定回读/接受/领奖走 mp 变体）。
 func isMPTaskCode(code string) bool { return mpTaskCodes[code] }
 
+// claimTaskReward 按任务码口径领奖：mp 码走 chat 域 mp 端点，其余走 Web 端。
+// claim 幂等（重复领返回 already_claimed → 0 分 0 能）。
+func claimTaskReward(p *Panel, a *auth.Auth, code string) (credit, energy int64, err error) {
+	if isMPTaskCode(code) {
+		return p.cfg.Upstream.ClaimRewardMP(a, code)
+	}
+	return p.cfg.Upstream.ClaimReward(a, code)
+}
+
 // taskByCode 拉取任务列表并定位单个任务；未找到返回 nil（不视为错误）。
 // 双口径：mp 专属任务在默认列表查不到，自动回落 mp 列表（仅对已登记的 mp 码，
 // 未知码不多打一次上游）。
@@ -1182,7 +1191,29 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		}
 		if before.Claimed || before.Current >= before.Target && before.Target > 0 {
 			item["status"] = "skipped"
-			item["message"] = "已完成（" + taskProgressText(before) + "）"
+			msg := "已完成（" + taskProgressText(before) + "）"
+			// 达标未领：先补领再跳过（issue #174）。经真实对话等链路点亮的
+			// 任务不经过任何自动动作，若这里只 skip，奖永远没人领（积分卡在
+			// 半路）。claim 幂等（重复领返回 already_claimed → 0 分 0 能），
+			// 宁可多试一轮也不漏领；判据用 progress（Current>=Target），不
+			// 依赖 accept_status=="completed"（回读会短暂转 completed 后回滚，
+			// 据此领奖会误领）。
+			if !before.Claimed {
+				credit, energy, cerr := claimTaskReward(p, a, act.TaskCode)
+				switch {
+				case cerr != nil:
+					item["claim_error"] = cerr.Error()
+					msg += "；补领失败（可在列表手动重试）"
+				case credit > 0 || energy > 0:
+					item["claimed"] = true
+					item["credit"] = credit
+					item["energy"] = energy
+					msg += fmt.Sprintf("；已补领 +%d 分 +%d 能", credit, energy)
+				default:
+					msg += "；奖励此前已领取"
+				}
+			}
+			item["message"] = msg
 			out = append(out, item)
 			continue
 		}
@@ -1204,15 +1235,9 @@ func (p *Panel) runAutoAll(a *auth.Auth) []map[string]any {
 		item["progress_after"] = taskProgressText(after)
 		// 进度达标即自动领奖（mp 任务走 chat 域 mp 口径，其余 Web 端接口）。
 		// 领奖失败不掩盖主流程结果：status 仍为 done，附加 claim_error 供前端提示。
-		if after != nil && after.Claimable {
-			item["claimable"] = true
-			var credit, energy int64
-			var cerr error
-			if isMPTaskCode(act.TaskCode) {
-				credit, energy, cerr = p.cfg.Upstream.ClaimRewardMP(a, act.TaskCode)
-			} else {
-				credit, energy, cerr = p.cfg.Upstream.ClaimReward(a, act.TaskCode)
-			}
+	if after != nil && after.Claimable {
+		item["claimable"] = true
+		credit, energy, cerr := claimTaskReward(p, a, act.TaskCode)
 			if cerr == nil {
 				item["claimed"] = true
 				item["credit"] = credit
