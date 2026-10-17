@@ -259,13 +259,21 @@ function rateLimitMeta(row, now) {
       title: model + '\n模型当前不可用' + (deadline ? '\n最早重试：' + fmtLocalDateTime(deadline) : ''),
     };
   }
-  let detail = resetAt
-    ? '预计 ' + fmtLocalDateTime(resetAt) + ' 解封' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '')
-    : (until ? '预计 ' + fmtLocalDateTime(until) + ' 恢复（剩余 ' + dur(remaining) + '）' : '预计解封时间未知');
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
   if (until && resetAt && until < resetAt) {
-    detail += ' · 网关最快 ' + dur(Math.max(0, Math.round((until - now) / 1000))) + ' 后重试';
+    // 双时钟（issue #171 问题二）：黄框出现/消失由 until 决定（网关为防超长
+    // 限流拖死全池，把重试封顶在 now+softRateMax），主文字却按 resetAt 显示，
+    // 导致「写的解封时间」与「实际掉框时刻」不一致。此时主文字同时明示两个
+    // 时刻与口径，倒计时跟随 until（与实际掉框一致，也与「模型与档位」页
+    // 锁池表的 until 口径对齐）。
+    const retryIn = until > now ? Math.round((until - now) / 1000) : 0;
+    detail = '网关 ' + fmtLocalDateTime(until) + ' 起重试' + (retryIn ? '（剩余 ' + dur(retryIn) + '）' : '') +
+      ' · 上游称 ' + fmtLocalDateTime(resetAt) + ' 恢复';
     title.push('网关最早重试：' + fmtLocalDateTime(until));
+  } else {
+    detail = resetAt
+      ? '预计 ' + fmtLocalDateTime(resetAt) + ' 解封' + (remaining ? '（剩余 ' + dur(remaining) + '）' : '')
+      : (until ? '预计 ' + fmtLocalDateTime(until) + ' 恢复（剩余 ' + dur(remaining) + '）' : '预计解封时间未知');
   }
   return { model, kind, detail, title: title.join('\n') };
 }
