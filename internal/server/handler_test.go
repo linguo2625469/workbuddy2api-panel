@@ -394,6 +394,57 @@ func TestChatSoftCoolsOnRateLimitBody(t *testing.T) {
 	}
 }
 
+// TestChat14003StaysModelScopedShortWindow 14003「模型繁忙」只停 (号, 模型) 一个
+// 短窗口，不把整号打成账号级冷却。
+//
+// 线上事故形态：国际版某个模型一忙，网关按账号级罚 600s；一次请求轮转两三个号，
+// 每个号都中 14003，几十秒内整池冷 10 分钟（用户口径「一发起请求就 10 分钟冷却」）。
+// 14003 的 displayMsg 是「模型繁忙，请换模型或稍后重试」——它是模型级信号，且
+// body 里没有恢复时刻，正确处置是短窗口停车而不是套 soft_rate 的 600s→2h 阶梯。
+func TestChat14003StaysModelScopedShortWindow(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 429, `{"code":14003,"msg":"too many requests","displayMsg":{"zh":"模型繁忙，请换模型或稍后重试"}}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	// 让 bad 积分更高被先选中（与 TestChatSoftCoolsOnRateLimitBody 同一确定性手法）。
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
+	// soft_rate 故意给 600s：14003 不得吃这条阶梯。
+	h := NewHandler(Config{Pool: p, Upstream: up, SoftCooldown: 600 * time.Second})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("bad")
+	if st.Cooling {
+		t.Fatalf("14003 是模型忙，账号不得整体冷却: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.2" ||
+		st.RateLimitedModels[0].Kind != "rate_limit" {
+		t.Fatalf("rate_limited_models=%+v want 一条 glm-5.2", st.RateLimitedModels)
+	}
+	// 首档 60s；即便命中翻倍也封顶 3m，绝不能是 soft_rate 的 600s。
+	if d := time.Until(st.RateLimitedModels[0].Until); d <= 0 || d > 3*time.Minute+5*time.Second {
+		t.Errorf("model until=%v want (0,3m]", d)
+	}
+	// 换模型立刻可用：账号本身健康。
+	if got := p.PickByUIDForModel("bad", "hy3-x"); got == nil {
+		t.Error("14003 后该账号对其它模型必须仍可选")
+	}
+	if got := p.PickByUIDForModel("bad", "glm-5.2"); got != nil {
+		t.Errorf("该 (号,模型) 应被停车，不该还能选中：%+v", got)
+	}
+}
+
 func TestApplyErrorPolicySoftRateExponentialBackoff(t *testing.T) {
 	// 吸收上游语义：带解析重置时间的 body 对齐墙钟；无时间文案走有界退避，且
 	// **冷却中的重复触发不堆加**（旧「每次都翻倍」正是全池被推到 2h 封顶的元凶）。
@@ -706,9 +757,12 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
-// TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
-// （现状不变）。
-func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
+// TestChat6004WithoutResetStaysModelScoped 6004 无时间文案 → 仍只停 (号, 模型)：
+// 时长取 soft 基数（注入 60s），账号本身不冷却。
+//
+// 此前这里退化成账号级冷却 + 审计行（RecordModelRateLimitAudit），一个模型的
+// 抖动就能把整号冷 600s——与 14003 被误判成账号级是同一条放大路径。
+func TestChat6004WithoutResetStaysModelScoped(t *testing.T) {
 	var calls int
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		calls++
@@ -731,15 +785,16 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
+	if st.Cooling {
+		t.Fatalf("6004 只该停模型，账号不得整体冷却: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" ||
+		st.RateLimitedModels[0].Kind != "rate_limit" {
+		t.Fatalf("rate-limited models=%+v, want row for glm-5.3", st.RateLimitedModels)
 	}
 	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
-	}
-	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
-		t.Fatalf("rate-limited models=%+v, want audit row for glm-5.3", st.RateLimitedModels)
+	if d := time.Until(st.RateLimitedModels[0].Until); d <= 0 || d > 61*time.Second {
+		t.Errorf("model until=%v want ~60s (soft base, not parsed)", d)
 	}
 }
 

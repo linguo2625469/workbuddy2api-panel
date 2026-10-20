@@ -606,3 +606,68 @@ func TestModelCooldownsPersistCompatOldState(t *testing.T) {
 		t.Error("旧文件 until 应照常加载（账号级冷却兼容）")
 	}
 }
+
+// TestCooldownModelBusyShortWindow 14003「模型繁忙」的停车窗口：60s 起、封顶 3m，
+// 窗口内重复命中不延长，且不写账号级 until。
+//
+// 与 CooldownSoftForModel 的差别是本方法独立于 soft_rate 阶梯：后者 600s 起、
+// 翻倍到 2h，套在瞬时繁忙上会把一次抖动放大成十分钟不可用。
+func TestCooldownModelBusyShortWindow(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownModelBusy("u1", "glm-5.2", "14003 model busy")
+
+	p.mu.RLock()
+	e := p.byUID["u1"]
+	until := e.until
+	p.mu.RUnlock()
+	if !until.IsZero() {
+		t.Fatalf("模型繁忙不得写账号级 until: %v", until)
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling {
+		t.Fatalf("账号不应进入 cooling: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.2" {
+		t.Fatalf("rate_limited_models=%+v want 一条 glm-5.2", st.RateLimitedModels)
+	}
+	first := st.RateLimitedModels[0].Until
+	if d := time.Until(first); d <= 0 || d > modelBusyBase+2*time.Second {
+		t.Errorf("首档 until=%v want ~%v", d, modelBusyBase)
+	}
+
+	// 窗口内重复命中：不延长（并发请求/兜底探测不得把 60s 堆成分钟级）。
+	p.CooldownModelBusy("u1", "glm-5.2", "14003 model busy")
+	st2, _ := p.Status("u1")
+	if !st2.RateLimitedModels[0].Until.Equal(first) {
+		t.Errorf("窗口内重复命中把 until 从 %v 推到 %v", first, st2.RateLimitedModels[0].Until)
+	}
+
+	// 窗口过期后连续命中：按次数翻倍，但封顶 modelBusyMax。
+	for i := 0; i < 6; i++ {
+		p.mu.Lock()
+		mc := e.modelCooldowns["glm-5.2"]
+		mc.Until = time.Now().Add(-time.Second)
+		e.modelCooldowns["glm-5.2"] = mc
+		p.mu.Unlock()
+		p.CooldownModelBusy("u1", "glm-5.2", "14003 model busy")
+	}
+	st3, _ := p.Status("u1")
+	if d := time.Until(st3.RateLimitedModels[0].Until); d > modelBusyMax+2*time.Second {
+		t.Errorf("翻倍后 until=%v 超过封顶 %v", d, modelBusyMax)
+	}
+}
+
+// TestCooldownModelBusyKeepsLaterCooldown 已有更晚的冷却（6004 墙钟 / 11102 负缓存）
+// 时，繁忙窗口不得把它缩短。
+func TestCooldownModelBusyKeepsLaterCooldown(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	later := time.Now().Add(50 * time.Minute)
+	p.CooldownSoftForModel("u1", time.Minute, later, "glm-5.2", "model rate limit")
+	p.CooldownModelBusy("u1", "glm-5.2", "14003 model busy")
+	st, _ := p.Status("u1")
+	if d := time.Until(st.RateLimitedModels[0].Until); d < 49*time.Minute {
+		t.Errorf("繁忙窗口把已有冷却从 50m 缩短到了 %v", d)
+	}
+}

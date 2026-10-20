@@ -117,7 +117,7 @@ func TestClassify(t *testing.T) {
 	}
 }
 
-// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004）。
+// TestIsModelRateLimit 判断 429 body 是否明确指向模型级限流（code 6004 / 14003）。
 func TestIsModelRateLimit(t *testing.T) {
 	cases := []struct {
 		body string
@@ -126,6 +126,9 @@ func TestIsModelRateLimit(t *testing.T) {
 		// 6004：模型级限流（issue #31 的核心场景）。
 		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
 		{`{"code": 6004,"msg":"x"}`, true},
+		// 14003：模型繁忙，同样只停该模型（国际版线上高频形态）。
+		{`{"code":14003,"msg":"too many requests","displayMsg":{"zh":"模型繁忙，请换模型或稍后重试"}}`, true},
+		{`{"code": "14003"}`, true},
 		// 其他 code（非模型级限流）→ 不算。
 		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
 		{`{"code":1,"msg":"429 rate limit"}`, false},
@@ -133,6 +136,29 @@ func TestIsModelRateLimit(t *testing.T) {
 	for _, c := range cases {
 		if got := IsModelRateLimit(c.body); got != c.want {
 			t.Errorf("IsModelRateLimit(%q)=%v want %v", c.body, got, c.want)
+		}
+	}
+}
+
+// TestIsModelBusy 区分「模型繁忙」14003 与「额度窗口用满」6004：前者没有恢复
+// 时刻，只能短窗口退避；后者带「将在 … 重置」的权威墙钟。两者混用会让一次
+// 瞬时抖动被停成十分钟（线上国际版就是这样整池冷 10 分钟）。
+func TestIsModelBusy(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"code":14003,"msg":"too many requests","displayMsg":{"zh":"模型繁忙，请换模型或稍后重试"}}`, true},
+		{`{"code": 14003}`, true},
+		{`{"code":"14003"}`, true},
+		// 6004 不是「繁忙」：它带额度窗口与恢复墙钟，走另一条停车路径。
+		{`{"code":6004,"msg":"将在 2026-10-20 16:37:47 UTC+8 重置"}`, false},
+		// 只认 code 字段：requestId 里出现 14003 不得误判。
+		{`{"code":1,"requestId":"14003abc"}`, false},
+	}
+	for _, c := range cases {
+		if got := IsModelBusy(c.body); got != c.want {
+			t.Errorf("IsModelBusy(%q)=%v want %v", c.body, got, c.want)
 		}
 	}
 }

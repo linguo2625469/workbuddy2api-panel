@@ -140,12 +140,13 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 //   - resetAt 非零（带解析时间）→ modelCooldowns[model].Until = min(resetAt,
 //     now+softRateMax)，ResetAt 记录上游原始墙钟（台账 ResetAt）。不写 until
 //     （全账号级冷却不受模型级限流污染），切模型即可用（模型豁免）。
-//   - resetAt 零值（无时间文案）→ 有界退避：base 起按 softStreak 翻倍、封顶
-//     softRateMax，且**在软冷却中**（until 未到期）时不推进/不延长（兜底探测不再把
-//     冷却越堆越厚）。不记录模型（不豁免）。
+//   - resetAt 零值（无时间文案）→ 有模型名时停 (号, 模型)：base 起按命中次数翻倍、
+//     封顶 softRateMax，同窗口内不重复延长；没有模型名才退回账号级退避。
+//     6004/14003 都是「这个模型忙/额度紧」，按账号冷却是把模型抖动放大成整池停摆。
+//     账号级 until 与 softStreak 全程不动（模型豁免，切模型即可用）。
 //
 // 与旧实现的差异：有上游重置时间时绝对不做指数堆加；无重置时间时，「冷却中兜底
-// 探测再 429」不再 softStreak++ 翻倍——这正是用户「全池被推到 2h 封顶」的元凶。
+// 探测再 429」不再把 softStreak 叠上去——这正是用户「全池被推到 2h 封顶」的元凶。
 func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time.Time, model, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -161,9 +162,9 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 				ResetAt: resetAt,
 				Reason:  reason,
 			}
-		} else {
-			// 无解析时间（普通软冷却）：有界退避（base 起按 softStreak 翻倍、封顶
-			// softRateMax）。注意：**在软冷却中**（until 未到期）时不推进/不延长。
+		} else if model == "" {
+			// 无模型名：无从「只停该模型」，退回账号级有界退避（现状语义）。
+			// 注意：**在软冷却中**（until 未到期）时不推进/不延长。
 			if e.coolKind != CoolSoft || !now.Before(e.until) {
 				d := p.softDurationLocked(base, e.softStreak+1)
 				e.softStreak++
@@ -172,14 +173,79 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 			e.coolKind = CoolSoft
 			e.reason = reason
 			clearRoutingModelCooldownsLocked(e)
+		} else {
+			// 无解析时间：停 (号, 模型)，不是整号。6004/14003 的语义都是「这个
+			// 模型忙/额度紧」，上游文案就是让客户端换模型；按账号冷却是把一个
+			// 模型的抖动放大成整池停摆（线上事故：几个并发请求几十秒冷掉整池）。
+			if e.modelCooldowns == nil {
+				e.modelCooldowns = map[string]modelCooldown{}
+			}
+			hits := e.modelCooldowns[model].Hits + 1
+			e.modelCooldowns[model] = modelCooldown{
+				Until:  now.Add(p.softDurationLocked(base, hits)),
+				Reason: reason,
+				Hits:   hits,
+			}
 		}
 		p.dirty.Store(true)
 	}
 }
 
-// RecordModelRateLimitAudit 记录无法参与模型路由的 6004 展示项。
-// 典型场景是 6004 没有可解析重置时间：账号仍按原有有界退避冷却，
-// 本方法只把模型名挂到 e.until 上供账号页展示，不影响 healthyForModel。
+// modelBusyBase/modelBusyMax 14003「模型繁忙」的独立停车窗口。
+//
+// 不复用 soft_rate 家族：那套阶梯（默认 600s 起、按命中翻倍、封顶 2h）是给
+// 「这个账号/模型被持续限流」准备的，惩罚一次瞬时抖动代价过高。14003 的
+// displayMsg 就是「模型繁忙，请换模型或稍后重试」，60s 足够让上游窗口滑过去；
+// 同一 (号, 模型) 反复命中再翻倍，但封顶 3 分钟——宁可多换一次号，也不要把
+// 一个忙碌模型停成十分钟不可用。
+const (
+	modelBusyBase = 60 * time.Second
+	modelBusyMax  = 3 * time.Minute
+)
+
+// CooldownModelBusy 把 (账号, 模型) 停一个短窗口（14003 模型繁忙专用）。
+//
+//   - 只写 modelCooldowns[model]，不碰账号级 until：同号换模型立即可用。
+//   - 同一窗口内重复命中不延长（并发请求/兜底探测不得把 60s 堆成分钟级）。
+//   - 已有更晚的冷却（6004 墙钟 / 11102 负缓存）时保留原截止，不缩短。
+func (p *Pool) CooldownModelBusy(uid, model, reason string) {
+	if uid == "" || model == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	if old, exists := e.modelCooldowns[model]; exists && old.Until.After(now) {
+		return
+	}
+	if e.modelCooldowns == nil {
+		e.modelCooldowns = map[string]modelCooldown{}
+	}
+	hits := e.modelCooldowns[model].Hits + 1
+	d := modelBusyBase
+	for i := 1; i < hits && d < modelBusyMax; i++ {
+		d *= 2
+	}
+	if d > modelBusyMax {
+		d = modelBusyMax
+	}
+	e.modelCooldowns[model] = modelCooldown{
+		Until:  now.Add(d),
+		Reason: reason,
+		Hits:   hits,
+	}
+	p.dirty.Store(true)
+}
+
+// RecordModelRateLimitAudit 记录无法参与模型路由的限流展示项。
+//
+// 保留给「只展示、不拦截」的兼容场景：handler 当前不再调用它——6004/14003 在
+// 无重置时间时已各自走 CooldownSoftForModel / CooldownModelBusy 真停车，不再
+// 需要「账号级冷却 + 审计行」的旧形态。
 func (p *Pool) RecordModelRateLimitAudit(uid, model, reason string) {
 	if uid == "" || model == "" {
 		return
