@@ -663,6 +663,39 @@ func TestBalanceRefreshDefaults(t *testing.T) {
 	}
 }
 
+// TestKeepaliveRefreshWindow checks defaults, explicit durations, and invalid values.
+func TestKeepaliveRefreshWindow(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Schedule.KeepaliveRefreshWindow != "168h" || c.KeepaliveRefreshWindowDur != 168*time.Hour {
+		t.Fatalf("default keepalive window=%q/%v want 168h", c.Schedule.KeepaliveRefreshWindow, c.KeepaliveRefreshWindowDur)
+	}
+
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	if err := os.WriteFile(fp, []byte(`{"schedule":{"keepalive_refresh_window":"24h"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.KeepaliveRefreshWindowDur != 24*time.Hour {
+		t.Fatalf("explicit keepalive window=%v want 24h", c2.KeepaliveRefreshWindowDur)
+	}
+
+	for _, raw := range []string{"0s", "not-a-duration"} {
+		if err := os.WriteFile(fp, []byte(`{"schedule":{"keepalive_refresh_window":"`+raw+`"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(fp); err == nil {
+			t.Errorf("keepalive_refresh_window=%q should be rejected", raw)
+		}
+	}
+}
+
 // TestPromptDefaultPassthrough 默认 prompt.mode=passthrough（对齐上游：透传客户端
 // 原始 system 是更保守的缺省）；custom 由用户显式选择，此时 PromptText 为内置默认（非空）。
 func TestPromptDefaultPassthrough(t *testing.T) {

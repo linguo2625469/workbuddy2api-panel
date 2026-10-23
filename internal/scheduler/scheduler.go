@@ -37,6 +37,12 @@ type Config struct {
 	// entry.creditsEarliestExpiry）。<=0 时不做路由门槛；展示仍使用完整逐包数据。
 	ExpiringSoonWindow time.Duration
 
+	// KeepaliveRefreshWindow 周期保活的临期窗口：排程到点的 token 保活只刷新
+	// NeedsRefresh(window) 为真的账号（剩余有效期 <= window，或已过期/无 expiry），
+	// 避免每天对全部账号轮换 refresh token。面板手动「全部保活」（RunKeepaliveNow）
+	// 不受本窗口影响，始终全量刷新。0 = 未配置（New 回落默认 7 天）；负数 = 不过滤。
+	KeepaliveRefreshWindow time.Duration
+
 	// CheckinDisabled 显式关闭签到排程（对应 config 的 schedule.checkin_enabled=false）。
 	// 禁用后不再有任何签到时点。旅行不再搭签到便车（已剥离为独立排程）。
 	CheckinDisabled bool
@@ -116,6 +122,9 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
+	if cfg.KeepaliveRefreshWindow == 0 {
+		cfg.KeepaliveRefreshWindow = 7 * 24 * time.Hour
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),
@@ -146,6 +155,21 @@ func (s *Scheduler) SetExpiringSoonWindow(d time.Duration) {
 	if changed && poolRef != nil {
 		poolRef.ClearExpiringSnapshots()
 	}
+}
+
+// keepaliveRefreshWindow 返回周期保活的临期窗口（配置快照）。
+func (s *Scheduler) keepaliveRefreshWindow() time.Duration {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.KeepaliveRefreshWindow
+}
+
+// SetKeepaliveRefreshWindow 热更新周期保活的临期窗口（schedule.keepalive_refresh_window，
+// 面板保存配置后调用）。<=0 视为不过滤（等价全量刷新）。
+func (s *Scheduler) SetKeepaliveRefreshWindow(d time.Duration) {
+	s.schedMu.Lock()
+	s.cfg.KeepaliveRefreshWindow = d
+	s.schedMu.Unlock()
 }
 
 // Reconfigure 热更新排程参数（面板保存配置后调用）：改时点/开关并通知运行中的循环重算。
@@ -424,7 +448,7 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 			case taskActivity:
 				s.runActivity(ctx)
 			case taskKeepalive:
-				s.RunKeepaliveNow()
+				s.runKeepaliveScheduled()
 			case taskBlackcat:
 				s.RunBlackcatNow()
 			case taskGrowth:
@@ -603,14 +627,39 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
+// 手动入口始终全量；排程到点走 runKeepaliveScheduled（只刷新临期窗口内的账号）。
 func (s *Scheduler) RunKeepaliveNow() {
+	s.runKeepalive(false)
+}
+
+// runKeepaliveScheduled 排程到点的 token 保活：只刷新临期窗口内的账号
+// （KeepaliveRefreshWindow；NeedsRefresh 缺 expiry/已过期恒为真）。窗口 <=0 时不过滤。
+func (s *Scheduler) runKeepaliveScheduled() {
+	s.runKeepalive(true)
+}
+
+// runKeepalive 保活遍历主体。selective=true 时按临期窗口过滤；手动入口（面板
+// POST /panel/api/keepalive_all）走 selective=false 全量，公开语义不变。
+func (s *Scheduler) runKeepalive(selective bool) {
 	includeDisabled := s.includeDisabledInTasks()
+	var window time.Duration
+	if selective {
+		window = s.keepaliveRefreshWindow()
+		if window <= 0 {
+			selective = false
+		}
+	}
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshTokenValue() == "" {
+			continue
+		}
+		// 临期过滤（仅排程路径）：token 距过期还早的账号本轮跳过，不轮换其
+		// refresh token。NeedsRefresh 对已过期/无 expiry 返回 true，天然兜底。
+		if selective && !a.NeedsRefresh(window) {
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
@@ -679,7 +728,7 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 				EarliestRemaining: earliestRemaining,
 				ExpiryBuckets:     poolExpiryBuckets(buckets),
 			})
-			}(a, st.UID)
+		}(a, st.UID)
 	}
 	wg.Wait()
 	s.lastBalanceRefresh.Store(time.Now().UnixNano())

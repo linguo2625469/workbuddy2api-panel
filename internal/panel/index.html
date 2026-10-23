@@ -969,6 +969,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
                   <input type="checkbox" name="keepalive_enabled"></div>
                 <label class="fld"><span class="lb">保活时点（小时，逗号分隔）</span>
                   <input name="keepalive_hours" placeholder="22"></label>
+                <label class="fld"><span class="lb">保活临期窗口（Go 时长）</span>
+                  <input name="keepalive_refresh_window" placeholder="168h">
+                  <span class="hint">仅刷新剩余有效期不超过该时长的凭证；已过期/无到期时间的账号始终刷新。留空 = 沿用现值</span></label>
               </div>
             </div>
             <div class="hr"></div>
