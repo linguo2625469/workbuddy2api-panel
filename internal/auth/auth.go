@@ -3,7 +3,6 @@
 package auth
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -210,51 +209,35 @@ func (a *Auth) IsGlobal() bool { return a.Realm() == "global" }
 // 无需加锁——Realm() 加锁是因为 realm/Domain 会被 RefreshToken 在锁内改写。
 func (a *Auth) IsEnterprise() bool { return strings.TrimSpace(a.EnterpriseID) != "" }
 
-// IsEnterpriseSession 报告当前凭证是否处于「企业上下文」：
-// 账号本身是企业版（IsEnterprise），或 AccessToken 签发自**企业切换会话**
-// （JWT payload 带 token_source=enterprise_switch——浏览器在企业空间状态下
-// 完成 OAuth 授权时签发）。
+// IsEnterpriseSession 报告当前凭证是否处于「企业上下文」。
 //
-// 为什么单独一站：企业切换会话与真企业版的上游表现**不同**（实测 2026-10-12，
-// 同一时刻与个人号 A/B 对照）——成长任务列表 / 额度查询 / 领养 Buddy 等**读端点
-// 与直连 API 照常**，但 /v2/report 行为事件**返回 200 却被静默丢弃**（15 个成长
-// 任务全部 0/x，重跑并 90s 内逐 15s 回读进度从不跳动），连登 / 签到同样无效。
-// 即「读得见、记不上账」：不跳过则队列每轮白跑全部任务（含真实对话配额）且
-// 无任何报错。因此行为类任务（活跃上报 / 连登 / 旅行 / 夜猫子 / 成长任务执行）
-// 的门控应使用本方法；签到与任务列表扫描不在此列（签到失败是显式报错，
-// 列表扫描实测可用）。额度查询 / 选号 / 保活照常（按 IsEnterprise 口径）。
+// **口径变更（2026-10-24 实测推翻原判据，issue #240）**：本方法现在**只看
+// enterpriseId**，不再把 JWT 的 token_source=enterprise_switch 当作企业形态。
+//
+// 原注释声称「企业切换会话的 /v2/report 返回 200 却被静默丢弃，成长任务全部
+// 0/x」。该结论来自 2026-10-12 的旧观察，**与 2026-10-24 的实测矛盾**：
+// 两个 enterpriseId 为空、仅带 token_source=enterprise_switch 的**个人版**账号，
+// 向 /v2/report 发一条 chat_request_send 事件后回读 /activity/growth/heatmap：
+//   - uid=69f23898（LeisureLinux）：today.score 0→14，is_active=False→True，
+//     updated_at 随事件刷新；
+//   - uid=a8f14208（隆巴多）：today.score 0→2，is_active=False→True。
+//
+// 即**这类账号的行为事件照常计分**，成长体系可用，原门控把能用的号全挡掉了
+// （连登/活跃上报/旅行/夜猫子/成长任务五类对这类账号全部白跑）。
+//
+// 判据收敛为一句：**enterpriseId 非空 = 真企业版**（成长端点上游一律 400
+// code 10001 / 403 growth-only，确实无个人成长体系，门控正确）；enterpriseId
+// 为空 = 个人号，即便本次授权签自企业切换会话也照常计分，不门控。
+//
+// 保留本方法的理由：调用点仍需要「是否真企业」这一口径；为避免逐个改调用点
+// 引入回归风险，保留方法名与签名，但把语义收敛为「真企业版」。
+// IsEnterprise() 是更精确的同义判据（新代码优先用它）。
 //
 // 每次现解码 JWT 而非 Parse 时缓存：RefreshToken 会整体换发 token，
 // 企业切换状态可能随重新授权翻转，缓存会读到过期形态。解码成本仅一次
 // base64 + 小 JSON（每调度轮每账号数次），可忽略。
 func (a *Auth) IsEnterpriseSession() bool {
-	if a.IsEnterprise() {
-		return true
-	}
-	return jwtTokenSource(a.AccessTokenValue()) == "enterprise_switch"
-}
-
-// jwtTokenSource 解出 JWT payload 中的 token_source 声明；非 JWT / 解码失败
-// 一律返回 ""（老 token 与非标准形态按无此声明处理，零回归）。先按无填充
-// base64url 解（JWT 标准），失败再试带填充形态（兼容非标准签发方）。
-func jwtTokenSource(token string) string {
-	parts := strings.Split(token, ".")
-	if len(parts) < 2 {
-		return ""
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		if raw, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
-			return ""
-		}
-	}
-	var payload struct {
-		TokenSource string `json:"token_source"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return ""
-	}
-	return payload.TokenSource
+	return a.IsEnterprise()
 }
 
 // isGlobalDomain 判定 domain 是否指向 www.workbuddy.ai 家族。

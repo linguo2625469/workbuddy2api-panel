@@ -631,13 +631,15 @@ func (p *Panel) accountTaskAuto(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	// 企业上下文门控（企业版 / 企业切换会话）：行为事件会被上游静默丢弃或
-	// 直接 403，执行任何成长任务都是零收益白跑（含真实对话配额）——直接拒绝
-	// 并给出修复路径，不再让用户对着「已上报但进度 0/x」猜原因
-	// （见 auth.IsEnterpriseSession）。
-	if a.IsEnterpriseSession() {
+	// 企业上下文门控（真企业版）：行为事件会被上游拒绝（400 code 10001 / 403
+	// growth-only），执行任何成长任务都是零收益白跑（含真实对话配额）——直接拒绝
+	// 并给出修复路径，不再让用户对着「已上报但进度 0/x」猜原因。
+	// 口径按 enterpriseId 判定（issue #240 实测修正）：仅带
+	// token_source=enterprise_switch 的**个人版**账号其行为事件照常计分，
+	// 不再被误挡（详见 auth.IsEnterpriseSession）。
+	if a.IsEnterprise() {
 		writeErr(w, http.StatusUnprocessableEntity,
-			"该账号为企业版/企业切换会话（token_source=enterprise_switch），无个人成长体系，成长任务行为事件会被上游忽略；请移除账号后以个人身份重新登录")
+			"该账号为企业版（enterpriseId 非空），无个人成长体系，成长任务行为事件会被上游拒绝；请移除账号或改用个人身份账号")
 		return
 	}
 	var body struct {
@@ -1274,12 +1276,12 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
-	// 企业上下文门控：与 accountTaskAuto 同口径（企业版 / 企业切换会话下成长任务
-	// 行为事件被上游静默丢弃，跑全量只会白耗真实对话配额）。「一键完成全部」与
-	// 单任务入口共用同一套动作，必须一并挡上（下游 fork 吸收本 PR 时发现的缺口）。
-	if a.IsEnterpriseSession() {
+	// 企业上下文门控：与 accountTaskAuto 同口径（真企业版下成长任务行为事件
+	// 被上游拒绝，跑全量只会白耗真实对话配额）。「一键完成全部」与单任务入口
+	// 共用同一套动作，必须一并挡上。
+	if a.IsEnterprise() {
 		writeErr(w, http.StatusUnprocessableEntity,
-			"该账号为企业版/企业切换会话（token_source=enterprise_switch），无个人成长体系，成长任务行为事件会被上游忽略；请移除账号后以个人身份重新登录")
+			"该账号为企业版（enterpriseId 非空），无个人成长体系，成长任务行为事件会被上游拒绝；请移除账号或改用个人身份账号")
 		return
 	}
 	// per-account 互斥（与单任务动作共用一把锁）：重复点击 409。

@@ -38,12 +38,19 @@ func sessionTestScheduler(t *testing.T, switched bool) (*Scheduler, *recorderUps
 	return s, r
 }
 
-// TestEnterpriseSessionGateSkipsBehaviorTasks 企业切换会话的行为类任务门控：
-// /v2/report 等行为事件对该形态返回 200 却被上游静默丢弃（实测 2026-10-12，
-// 15 个成长任务全部 0/x 且 90s 内进度从不跳动），执行即零收益白跑——
-// 活跃上报 / 连登管家 / 猫猫旅行 / 夜猫子必须一个上游调用都不发；
-// 签到不在此列（对该形态未观测到静默失败，且失败是显式报错）。
-// 每个子用例配个人号对照，证明"没发请求"是门控生效而非构造有误。
+// TestEnterpriseSessionGateSkipsBehaviorTasks 企业切换会话（token_source=
+// enterprise_switch 且 enterpriseId 为空）的行为类任务：**不门控**。
+//
+// 口径变更（issue #240 实测修正，2026-10-24）：旧口径认为该形态下 /v2/report
+// 返回 200 却被上游静默丢弃（成长任务全 0/x），故活跃上报 / 连登管家 /
+// 猫猫旅行 / 夜猫子一律跳过。实测推翻该结论——两个 enterpriseId 为空的
+// enterprise_switch 个人号，向 /v2/report 发一条 chat_request_send 事件后
+// 回读 /activity/growth/heatmap：today.score 与 is_active 均随之变化
+// （0→14 / False→True 与 0→2 / False→True），即行为事件**照常计分**。
+// 旧门控把这类可用账号的成长体系全挡掉了（白跑）。
+//
+// 真企业版（enterpriseId 非空）仍门控——见 TestEnterpriseGateSkipsGrowthTasks。
+// 每个子用例配个人号对照，证明两侧行为一致（切换会话号与个人号同样发起）。
 func TestEnterpriseSessionGateSkipsBehaviorTasks(t *testing.T) {
 	// 与 TestEnterpriseGateSkipsGrowthTasks 同款：把夜猫子窗口钉在窗口内。
 	restoreClock := nowForNightWindow
@@ -59,17 +66,17 @@ func TestEnterpriseSessionGateSkipsBehaviorTasks(t *testing.T) {
 		gated bool
 	}{
 		{"签到", func(s *Scheduler) { s.RunCheckinNow() }, "/daily-checkin", false},
-		{"活跃上报", func(s *Scheduler) { s.RunActivityNow() }, "/v2/report", true},
-		{"猫猫旅行", func(s *Scheduler) { s.RunTravelNow() }, "/activity/growth/buddy/info", true},
-		{"夜猫子", func(s *Scheduler) { s.RunBlackcatNow() }, "/v2/activity/growth/tasks", true},
-		{"连登管家", func(s *Scheduler) { s.RunStreakBonusNow() }, "/activity/growth/streak", true},
+		{"活跃上报", func(s *Scheduler) { s.RunActivityNow() }, "/v2/report", false},
+		{"猫猫旅行", func(s *Scheduler) { s.RunTravelNow() }, "/activity/growth/buddy/info", false},
+		{"夜猫子", func(s *Scheduler) { s.RunBlackcatNow() }, "/v2/activity/growth/tasks", false},
+		{"连登管家", func(s *Scheduler) { s.RunStreakBonusNow() }, "/activity/growth/streak", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			sSess, rSess := sessionTestScheduler(t, true)
 			c.run(sSess)
 			if c.gated && rSess.has(c.endpoint) {
-				t.Errorf("企业切换会话不应发起 %s，实际请求=%v", c.endpoint, rSess.snapshot())
+				t.Errorf("该形态不应发起 %s，实际请求=%v", c.endpoint, rSess.snapshot())
 			}
 			if !c.gated && !rSess.has(c.endpoint) {
 				t.Errorf("企业切换会话应照常发起 %s（不门控），实际请求=%v", c.endpoint, rSess.snapshot())
