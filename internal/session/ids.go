@@ -56,6 +56,27 @@ func NewMessageID() string {
 	return fmt.Sprintf("%016x%016x", uint64(rand.Uint64())|1, rand.Uint64())
 }
 
+// NewConversationID 生成会话级标识：UUID v4 带横线（36 字符），对齐官方客户端
+// X-Conversation-ID 的实测形态。
+//
+// 用途边界：**只给「网关自己发起的会话」**用（自动化任务上报体、面板批量动作、
+// 定时任务等）。真实用户会话必须优先透传客户端声明的 conversationId——伪造会
+// 破坏后台按对话聚合。
+//
+// 为什么不用带项目缩写的形式（issue #239 / #51）：项目缩写直接作为会话/请求 ID
+// 进入上游上报体（conversationId / parentConversationId / traceId 等），是能被
+// 一眼识别的自证标识。官方同位置恒为 UUID v4 或 32 hex，本函数提供前者。
+func NewConversationID() string {
+	var u [16]byte
+	if _, err := cryptorand.Read(u[:]); err != nil {
+		// 熵源故障兜底：退化为 32 hex（形态退让，但仍是合法 ID，不 panic、不空串）。
+		return NewMessageID()
+	}
+	u[6] = (u[6] & 0x0f) | 0x40 // version 4
+	u[8] = (u[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16])
+}
+
 // deriveSalt 进程启动随机盐：对所有稳定聚合 ID 的纯派生统一加盐，使派生值无法
 // 按外部可控的键内容（会话键/轮级键）被预计算；重启换新（重启时旧对话轮/会话已
 // 结束，不构成断档）。会话级（RequestIDForKey）与轮级（TurnRequestID）共用同一盐。

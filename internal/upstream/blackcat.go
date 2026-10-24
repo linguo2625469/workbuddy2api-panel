@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 )
 
 // InNightWindow 当前是否处于夜猫子计数窗口（23:00–08:00 本地时区）。
@@ -59,7 +60,7 @@ func (c *Client) RunNightChats(a *auth.Auth, need int) (int64, error) {
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))
 		rc.Close()
-		if err := c.ReportChatActivityModel(a, fmt.Sprintf("wb2api-night-%d-%d", time.Now().UnixMilli(), i), "", "glm-5.2", "GLM-5.2"); err != nil {
+		if err := c.ReportChatActivityModel(a, session.NewConversationID(), "", "glm-5.2", "GLM-5.2"); err != nil {
 			return ok, fmt.Errorf("第 %d 次上报失败: %w", i+1, err)
 		}
 		ok++

@@ -36,19 +36,20 @@ func TestInjectPromptCacheKey_PreservesExisting(t *testing.T) {
 
 // TestInjectPromptCacheKey_UsesConversationID 覆盖任务用例 2：
 // body 无 prompt_cache_key 但有 conversation_id → 用它做会话哈希源。
-// 格式 wb2a-<uid8>-<conversationHash>：conversation_id 不逐字出现，而是驱动哈希段
-// （同 id 同 key、不同 id 不同 key）。同时仍带 uid8 隔离前缀。
+// 格式 = UUID v4 形态 36 字符（issue #239：不再带项目缩写与 uid 明文段）：
+// conversation_id 不逐字出现，而是驱动哈希（同 id 同 key、不同 id 不同 key）。
+// 账号隔离靠 uid 参与哈希输入（不再靠明文 uid 段）。
 func TestInjectPromptCacheKey_UsesConversationID(t *testing.T) {
 	uid := "user-abc-123"
 	in := `{"model":"glm-5.2","messages":[],"conversation_id":"conv-42"}`
 
 	out := InjectPromptCacheKey([]byte(in), uid, "")
 	got := extractCacheKey(t, out)
-	if !strings.HasPrefix(got, "wb2a-") {
-		t.Fatalf("expected wb2a- prefix, got=%q", got)
+	if !isUUIDv4Shape(got) {
+		t.Fatalf("expected UUID v4 shape key, got=%q", got)
 	}
-	if !strings.Contains(got, "user-abc") {
-		t.Fatalf("expected uid8 isolation prefix, got=%q", got)
+	if strings.Contains(got, "user-abc") {
+		t.Fatalf("key must not contain raw uid, got=%q", got)
 	}
 	// 同 conversation_id 两次出站 → 同 key（稳定）。
 	out2 := InjectPromptCacheKey([]byte(in), uid, "")
@@ -89,29 +90,51 @@ func TestInjectPromptCacheKey_AccountIsolation(t *testing.T) {
 	if ka == kb {
 		t.Fatalf("cross-account key collision: both=%q", ka)
 	}
-	if !strings.HasPrefix(ka, "wb2a-") || !strings.HasPrefix(kb, "wb2a-") {
-		t.Fatalf("keys must carry wb2a- prefix: a=%q b=%q", ka, kb)
+	if !isUUIDv4Shape(ka) || !isUUIDv4Shape(kb) {
+		t.Fatalf("keys must be UUID v4 shape: a=%q b=%q", ka, kb)
 	}
 }
 
 // TestInjectPromptCacheKey_Format 覆盖任务用例 5：
-// cache key 格式校验（含 uid8 前缀）。
+// cache key 格式校验 = UUID v4 形态 36 字符（issue #239）。
 func TestInjectPromptCacheKey_Format(t *testing.T) {
 	uid := "1234567890abcdef"
 	in := `{"model":"glm-5.2","messages":[]}`
 	out := InjectPromptCacheKey([]byte(in), uid, "conv-fmt")
 	got := extractCacheKey(t, out)
-	if !strings.HasPrefix(got, "wb2a-") {
-		t.Fatalf("expected wb2a- prefix, got=%q", got)
+	if !isUUIDv4Shape(got) {
+		t.Fatalf("expected UUID v4 shape key, got=%q", got)
 	}
-	if !strings.Contains(got, "12345678") {
-		t.Fatalf("expected uid8 (12345678) in key, got=%q", got)
+	if strings.Contains(got, "12345678") {
+		t.Fatalf("key must not contain raw uid prefix, got=%q", got)
 	}
 }
 
+// isUUIDv4Shape 判定字符串是否为 RFC 4122 v4 UUID 形态（36 字符带横线，
+// 第 7 字节高位 0x40、第 9 字节高位 0x80）。用于钉住 prompt_cache_key 与
+// 会话 ID 的对外形态——官方同位置恒为此形态，别的形态即可被判别（issue #239）。
+func isUUIDv4Shape(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+				return false
+			}
+		}
+	}
+	return s[14] == '4' && (s[19] == '8' || s[19] == '9' || s[19] == 'a' || s[19] == 'b')
+}
+
 // TestInjectPromptCacheKey_EmptyConversation 覆盖任务用例 3 边界：
-// 无 conversation_id 且无会话标识 → 生成键含 uid8 但 conversationHash 段为定值（不复用前缀）。
-// 不应报错、不应空串（key 非空）。
+// 无 conversation_id 且无会话标识 → 生成键非空、形态合法（UUID v4），
+// 仍按 uid 隔离（不复用其他会话的槽）。不应报错、不应空串。
 func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	uid := "user-abc-123"
 	in := `{"model":"glm-5.2","messages":[]}`
@@ -120,11 +143,8 @@ func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	if got == "" {
 		t.Fatalf("expected non-empty key when no conversation, got empty")
 	}
-	if !strings.HasPrefix(got, "wb2a-") {
-		t.Fatalf("expected wb2a- prefix, got=%q", got)
-	}
-	if !strings.Contains(got, "user-abc") {
-		t.Fatalf("expected uid8 in key, got=%q", got)
+	if !isUUIDv4Shape(got) {
+		t.Fatalf("expected UUID v4 shape key, got=%q", got)
 	}
 }
 
