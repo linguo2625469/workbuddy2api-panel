@@ -367,6 +367,89 @@ curl -s http://localhost:7863/v1/search/messages \
        "messages":[{"role":"user","content":"Perform a web search for the query: OpenAI 最新模型"}]}'
 ```
 
+## 客户端接入
+
+### Claude Code（Anthropic Messages 协议）
+
+Claude Code 用的是 **Anthropic Messages** 协议（`POST /v1/messages`），而本网关对
+普通客户端只暴露 **OpenAI 兼容**接口（`POST /v1/chat/completions`）。所以不能把
+`base_url` 直指本网关的 `/v1/chat/completions`——那会让 Claude Code 以为拿到的是
+Anthropic 端点，实际发过去的是 OpenAI 形态的 body，响应也对不上。
+
+> 注意：本网关的 `/v1/search/messages` 是**搜索**端点（走上游 `/agenttool/v1/search`），
+> 不是 Anthropic 对话转发——两者不要混淆。
+
+**路径 A：用 claude-code-router 做协议翻译（不改网关）**
+
+claude-code-router 负责把 Anthropic 协议转成 OpenAI 协议，转发到本网关：
+
+```json
+{
+  "LOG": true,
+  "APIKEY": "your-api-key",
+  "Providers": [
+    {
+      "name": "workbuddy",
+      "api_base_url": "http://127.0.0.1:7863/v1/chat/completions",
+      "models": ["cn:glm-5.3", "cn:deepseek-v4-pro", "global:hy3"]
+    }
+  ],
+  "Router": { "default": "workbuddy" }
+}
+```
+
+注意 `api_base_url` 要写到**完整路径** `/v1/chat/completions`（不是只到 `/v1`）。
+
+**路径 B：直接用 OpenAI 兼容客户端**
+
+Cherry Studio、NextChat、LobeChat、Open WebUI、dsh 等都原生支持 OpenAI 形态，
+直接指 `http://127.0.0.1:7863/v1` + 本网关的 `api_key` 即可，无需任何中间层。
+
+### 模型名必须带 `cn:` / `global:` 域前缀
+
+`GET /v1/models` 返回的模型 id 形如 `cn:glm-5.3`、`global:deepseek-v4.1-flash`。
+**调用时也必须带同样的前缀**：
+
+| 写法 | 含义 |
+|---|---|
+| `cn:glm-5.3` | 显式国内域 |
+| `global:glm-5.3` | 显式国际域 |
+| `glm-5.3`（裸名） | **按国内域处理** |
+
+前缀解析规则（`internal/server/resolve_model.go`）：取第一个 `:`，前段恰为
+`cn` / `global` 才剥离；其余一律当裸名走国内域。大小写敏感（必须是精确的小写枚举）。
+
+**这是最容易踩的坑**，而且报错信息有很强的误导性。池里只有国际版账号时，写裸名
+`glm-5.3` 会被派到国内域找号，一个都没有，于是返回：
+
+```json
+{"error":{"code":"no_healthy_account",
+  "gateway_hint":"no healthy account available in pool; check /status or retry later"}}
+```
+
+这个报错读起来像「账号全挂了 / 池子空了」，实际只是**模型名少了前缀**。
+
+同样要注意：池里**两域都有**账号时，裸名也能正常跑通（默认走国内域）——所以症状
+会随账号池组成变化，看起来像「时好时坏」。
+
+### 常见错误对照表
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| `no_healthy_account` | 模型名缺 `cn:`/`global:` 前缀，域路由错 | 按上表加前缀 |
+| `no_healthy_account` | 账号全在冷却 / 熔断 / 禁用 | 看面板首页状态列与 `/status` |
+| `model_unavailable` + `11158` | 账号档位不支持该模型（如免费个人号用 GPT-6.x） | 换该档位支持的模型，或换号 |
+| `model_unavailable` + `11102` | 上游该后端无此模型 | 换模型 |
+| 400 + 内容审核文案 | 上游逐字匹配误杀官方 system 模板 | 网关已有降级重试，见「内容拦截误报与降级重试」 |
+| 工具调用丢失 | 客户端与网关的 tool schema 形态不匹配 | 确认客户端发标准 OpenAI `tools` 字段 |
+| claude-code-router 连不上 | `api_base_url` 写成了 `/v1` 而非完整路径 | 改成 `/v1/chat/completions` |
+
+### Windows 注意点
+
+- `node` 需在 `PATH` 里（claude-code-router 依赖它）；
+- `.bat` 脚本需 **CRLF** 换行（LF 会导致 Windows 解析异常）；
+- 网关的工作目录必须是仓库根（`config.json` / `auths/` / `data/` 都是相对路径解析）。
+
 ## 配置说明
 
 **`config.example.json` 是配置项最完整的参考**：每个字段、默认值与结构都能在其中找到，示例值一律是 `test_key` 之类占位符，**不含任何真实密钥**。下表为字段含义速查。
