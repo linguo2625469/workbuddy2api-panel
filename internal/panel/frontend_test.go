@@ -132,6 +132,110 @@ try {
 	}
 }
 
+// TestAppJSRenderRateLimitedAccounts 真·渲染闸门：在严格模式沙箱里跑整份 app.js，
+// 再喂一份「有账号被模型级限流」的 overview 数据调用 renderAccounts /
+// renderModelLocks / renderExpirySnapshot。
+//
+// 为什么必须有这一条：顶层冒烟只求值、不喂数据，任何「只在特定数据下才走到」的
+// 渲染路径都照不到。实际事故是 rateLimitMeta 给未声明的 detail 赋值——'use strict'
+// 下抛 ReferenceError，且位置在 renderAccounts 的 map 里，于是账号池留空、后面的
+// 模型锁池与积分到期提醒根本没执行（用户视角：三块同时消失，只有点「检查」时
+// 到期提醒才出现）。切片单测当年因为沙箱跑的是非严格模式而假绿，本用例把
+// 「整份文件 + 真实数据 + 严格模式」三者同时钉住。
+//
+// 为什么用 new Function 而不是 vm.createContext：Node 的 contextify 全局对象带
+// named property interceptor，`has` 对任意名字都成立，于是「给未声明标识符赋值」
+// 会被当成给全局对象加属性而**不抛错**——同样的代码在浏览器（真严格模式）里必炸。
+// 用 new Function 拼整份源码：函数体首行 'use strict' 让整段变严格，未声明赋值
+// 变成 unresolvable reference，立刻抛 ReferenceError，与浏览器语义一致。
+func TestAppJSRenderRateLimitedAccounts(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; render smoke skipped")
+	}
+	harness := `const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; },
+  apply() { return inert; },
+  construct() { return inert; },
+  has() { return true; },
+});
+const stubs = {
+  location: { hash: '#accounts' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { querySelectorAll: () => [], querySelector: () => inert, getElementById: () => inert, addEventListener() {}, documentElement: inert, head: inert, body: inert, createElement: () => inert, cookie: '' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  MutationObserver: class { constructor() {} observe() {} disconnect() {} takeRecords() { return []; } },
+};
+// Node 25 的 navigator 是只读 getter，必须用 defineProperty 覆盖。
+for (const [k, v] of Object.entries(stubs)) {
+  Object.defineProperty(globalThis, k, { value: v, writable: true, configurable: true });
+}
+let api;
+try {
+  api = new Function(src + '\nreturn { renderAccounts: renderAccounts, renderModelLocks: renderModelLocks, renderExpirySnapshot: renderExpirySnapshot };')();
+} catch (e) {
+  console.log('TOPLEVEL FAIL:', (e && e.stack ? e.stack : e).toString().split('\n').slice(0, 5).join('\n'));
+  process.exit(1);
+}
+const now = Date.now();
+const resetAt = new Date(now + 6 * 3600 * 1000).toISOString();
+const until = new Date(now + 1 * 3600 * 1000).toISOString();
+const account = {
+  uid: 'uid-0000000000000001', nickname: '被限流的号', realm: 'cn',
+  credits: 100, credits_total: 200, credits_expiring: 40,
+  credits_earliest_expiry: new Date(now + 3 * 86400 * 1000).toISOString(),
+  credits_earliest_remaining: 40,
+  credits_expiry_buckets: [{ date: new Date(now + 3 * 86400 * 1000).toISOString().slice(0, 10), expire_at: new Date(now + 3 * 86400 * 1000).toISOString(), remain: 40 }],
+  // 四种台账形态全给：双时钟（until < reset_at，模型级限流被网关封顶）、只有上游
+  // 重置时刻、两者都没有、以及 11102 模型不可用。
+  rate_limited_models: [
+    { model: 'glm-5.3', kind: 'rate_limit', reset_at: resetAt, until: until },
+    { model: 'glm-4.6', kind: 'rate_limit', reset_at: resetAt },
+    { model: 'glm-4', kind: 'rate_limit' },
+    { model: 'gone-model', kind: 'model_unavailable', until: until },
+  ],
+};
+const lockRow = { model: 'glm-5.3', realm: 'cn', total: 1, servable: 0, locked: 1, state: 'locked', unlock_at: until, fully_unlock_at: until, reason: '429 code 6004 该模型用量超限' };
+const failures = [];
+const step = (label, fn) => { try { fn(); } catch (e) { failures.push(label + ': ' + ((e && e.message) || e)); } };
+step('renderAccounts', () => api.renderAccounts([account]));
+step('renderModelLocks', () => api.renderModelLocks([lockRow]));
+step('renderExpirySnapshot', () => api.renderExpirySnapshot({
+  accounts: [account], balance_refresh_sec: 300, balance_refreshed_at: new Date(now).toISOString(),
+}));
+if (failures.length) {
+  console.log('RENDER FAIL:\n' + failures.join('\n'));
+  process.exit(1);
+}
+console.log('RENDER OK');
+process.exit(0);
+`
+	hf, err := os.CreateTemp(t.TempDir(), "render-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hf.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	hf.Close()
+	cmd := exec.Command(node, hf.Name(), "app.js")
+	cmd.Dir = "."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("带模型级限流的账号池渲染崩溃: %v\n%s", err, out)
+	}
+	if !bytes.Contains(out, []byte("RENDER OK")) {
+		t.Fatalf("带模型级限流的账号池渲染未通过:\n%s", out)
+	}
+}
+
 // 积分扣除维度的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
 func TestAppJSCreditDimensionFormatting(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -180,6 +284,12 @@ process.stdout.write(JSON.stringify({
 }
 
 // 模型限流时间必须同时支持上游 reset_at、网关 until 和无重置时间三种形态。
+//
+// 切片求值必须显式带上 'use strict'：app.js 首行就是它，而这里只取中间一段源码，
+// 严格模式指令不会跟着进来——少了这一行，切片里的「给未声明标识符赋值」会静默
+// 创建全局而不会抛错，本用例就会对一个真实的 ReferenceError 假绿（曾如此：detail
+// 未声明，只要有一个模型被限流就打断 renderAccounts，账号池 / 模型锁池 / 到期提醒
+// 三块同时空白）。harness 的语义必须与生产一致，否则闸门形同不存在。
 func TestAppJSRateLimitMeta(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -193,7 +303,7 @@ const end = src.indexOf('function rateLimitRowsHtml');
 if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
 const ctx = { Date, Number, String, Math };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
 const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
 const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
 const until = new Date(2026, 8, 28, 15, 0, 0).getTime();

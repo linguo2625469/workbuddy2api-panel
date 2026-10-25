@@ -264,6 +264,12 @@ function rateLimitMeta(row, now) {
     };
   }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
+  // detail 必须显式声明：本文件首行是 'use strict'，给未声明标识符赋值会抛
+  // ReferenceError（而不是像非严格模式那样悄悄创建全局）。这条路径只在**有账号被
+  // 模型级限流**时才走到，一旦抛出就会把 renderAccounts 整轮打断——账号池、模型
+  // 锁池、积分到期提醒三块同时空白，看上去像"面板坏了"。历史 bug 见本文件下方
+  // renderAccounts 的隔离渲染说明。
+  let detail;
   if (until && resetAt && until < resetAt) {
     // 双时钟（issue #171 问题二）：黄框出现/消失由 until 决定（网关为防超长
     // 限流拖死全池，把重试封顶在 now+softRateMax），主文字却按 resetAt 显示，
@@ -524,13 +530,27 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    renderAccounts(d.accounts || []);
-    renderModelLocks(d.model_locks);
+    // 三块渲染互相隔离：任何一块抛错都不该把另外两块一起打掉。
+    //
+    // 历史事故（本次修复）：rateLimitMeta 里给未声明的 detail 赋值，'use strict'
+    // 下抛 ReferenceError，而这个错误发生在 renderAccounts 的 map 里——于是账号池
+    // 表格留空、紧随其后的 renderModelLocks 与 renderExpirySnapshot 根本没执行，
+    // 三个面板一起空白。触发条件极隐蔽：只有「某个模型被限流」、账号带
+    // rate_limited_models 行时才走到那条赋值。用户看到的只是"账号池不显示账号、
+    // 模型锁池也不显示、到期提醒要手动检查才有"，控制台外无从判断因果。
+    // 现在逐个 try：坏掉的那块在 toast 里点名报错（比整页空白可诊断），其余照常渲染。
+    const renderFailures = [];
+    const isolated = (label, fn) => {
+      try { fn(); } catch (e) { renderFailures.push(label + '渲染失败：' + ((e && e.message) || e)); }
+    };
+    isolated('账号池', () => renderAccounts(d.accounts || []));
+    isolated('模型锁池', () => renderModelLocks(d.model_locks));
     // 到期卡片跟随首页统计同步刷新（用同一份响应里的按日批次，不额外发请求）。
     // 2 分钟内的实时明细最新且更全，保留；过期后由 state 快照接管，避免点过一次
     // 「检查」之后卡片永远停在那一刻的旧数据。
     const liveFresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
-    if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
+    if ($('expBox') && !liveFresh) isolated('积分到期提醒', () => renderExpirySnapshot(d));
+    if (renderFailures.length) throw new Error(renderFailures.join('；'));
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
