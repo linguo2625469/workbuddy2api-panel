@@ -193,7 +193,7 @@ const end = src.indexOf('function rateLimitRowsHtml');
 if (start < 0 || end < 0) throw new Error('rate limit helpers not found');
 const ctx = { Date, Number, String, Math };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.rateLimitMeta=rateLimitMeta;', ctx);
+vm.runInContext("'use strict';\n" + src.slice(start, end) + '\nglobalThis.rateLimitMeta=rateLimitMeta;', ctx);
 const now = new Date(2026, 8, 28, 14, 0, 0).getTime();
 const reset = new Date(2026, 8, 28, 16, 0, 0).getTime();
 const until = new Date(2026, 8, 28, 15, 0, 0).getTime();
@@ -221,6 +221,110 @@ process.stdout.write(JSON.stringify({
 	const want = `{"rate":"网关 2026-09-28 15:00 起重试（剩余 1时00分） · 上游称 2026-09-28 16:00 恢复","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("rate-limit formatting=%s want %s", out, want)
+	}
+}
+
+// 账号携带模型级限流（rate_limited_models）时，账号池表格必须照常渲染。
+//
+// 为什么需要：rateLimitMeta 里曾漏写 let detail —— app.js 顶部是 'use strict'，
+// 该赋值在浏览器里抛 ReferenceError，被 renderAccounts 的 map 放大成「整张表格空白」
+// （统计卡正常、表头在、一行数据都没有）。上面的 TestAppJSRateLimitMeta 用
+// vm.runInContext 切片执行、丢了顶部 'use strict'，隐式全局让这条路径静默通过，
+// 所以必须在「完整 app.js + 严格模式」下跑一遍真实渲染路径。
+func TestAppJSRenderAccountsRateLimited(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; renderAccounts test skipped")
+	}
+	harness := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; },
+  apply() { return inert; },
+  construct() { return inert; },
+  has() { return true; },
+});
+function mkEl() {
+  return {
+    innerHTML: '', textContent: '', value: '', style: {}, dataset: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+    appendChild() {}, addEventListener() {}, removeEventListener() {},
+    setAttribute() {}, getAttribute() { return null; },
+    querySelector() { return inert; }, querySelectorAll() { return []; },
+    focus() {}, blur() {}, click() {}, closest() { return null; },
+    remove() {}, children: [],
+  };
+}
+const els = {};
+const elById = id => { if (!els[id]) els[id] = mkEl(); return els[id]; };
+const document = {
+  getElementById: elById,
+  querySelector: () => inert,
+  querySelectorAll: () => [],
+  createElement: () => mkEl(),
+  addEventListener() {},
+  documentElement: inert, head: inert, body: inert, cookie: '', readyState: 'complete',
+};
+const sandbox = {
+  location: { hash: '#accounts' },
+  history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document,
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  MutationObserver: class { constructor() {} observe() {} disconnect() {} takeRecords() { return []; } },
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set,
+  RegExp, Error, TypeError, isNaN, parseInt, parseFloat,
+  encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+};
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src, sandbox, { filename: 'app.js' });
+const accounts = JSON.parse(process.env.ACC_JSON);
+sandbox.renderAccounts(accounts);
+const html = elById('accBody').innerHTML;
+process.stdout.write(JSON.stringify({
+  rows: (html.match(/<tr/g) || []).length,
+  hasModel: html.includes('gpt-6.1-sol'),
+}));
+// app.js 顶层 start() 的 setInterval 会让 node 事件循环不退出，成功路径显式收尾。
+process.exit(0);
+`
+	hf, err := os.CreateTemp(t.TempDir(), "render-accounts-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hf.WriteString(harness); err != nil {
+		t.Fatal(err)
+	}
+	hf.Close()
+
+	// 生产形态：global 号撞上游 11158，网关记下模型级限流；reset_at 为零时间
+	// （"0001-01-01T00:00:00Z"）表示上游未给重置时刻。
+	accounts := `[
+	 {"uid":"d8abf6cd-bcdb-4b13-8737-ec7fb580737b","nickname":"限流号","realm":"cn",
+	  "credits":5728,"credits_total":5728,"disabled":false,"cooling":false,
+	  "rate_limited_models":[{"model":"gpt-6.1-sol","kind":"rate_limit",
+	   "until":"2026-10-25T21:57:24.34078646+08:00","reset_at":"0001-01-01T00:00:00Z",
+	   "reason":"11158 model not allowed for account type"}]},
+	 {"uid":"2978e9b4-ffc3-47ad-8a79-0ebd2a70a6fe","nickname":"正常号","realm":"cn",
+	  "credits":3856,"credits_total":3900,"disabled":false,"cooling":false}
+	]`
+	cmd := exec.Command(node, hf.Name(), "app.js")
+	cmd.Dir = "." // 测试工作目录 = internal/panel
+	cmd.Env = append(os.Environ(), "ACC_JSON="+accounts)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("renderAccounts 在含 rate_limited_models 的账号上崩溃（整表空白的根因）: %v\n%s", err, out)
+	}
+	const want = `{"rows":2,"hasModel":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("renderAccounts=%s want %s（应渲染 2 行且含限流模型名）", out, want)
 	}
 }
 
