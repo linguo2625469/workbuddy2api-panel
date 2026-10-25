@@ -264,6 +264,10 @@ function rateLimitMeta(row, now) {
     };
   }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
+  // 本文件顶部是 'use strict'：漏写 let 会在浏览器里抛 ReferenceError（严格模式下
+  // 隐式全局被禁止），而 rateLimitMeta 处在 renderAccounts 的 map 内，一次抛错就让
+  // 整张账号池表格空白（统计卡正常、表头在、一行数据都没有）。
+  let detail;
   if (until && resetAt && until < resetAt) {
     // 双时钟（issue #171 问题二）：黄框出现/消失由 until 决定（网关为防超长
     // 限流拖死全池，把重试封顶在 now+softRateMax），主文字却按 resetAt 显示，
