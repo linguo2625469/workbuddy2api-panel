@@ -255,14 +255,13 @@ func TestRequestMetricsDetectsStreamErrorFrame(t *testing.T) {
 	}
 }
 
-func TestParseModelFromBody(t *testing.T) {
-	if got := parseModelFromBody([]byte(`{"model":"deepseek-v4-flash","stream":true}`)); got != "deepseek-v4-flash" {
+// 统计行的 model 列：空 model 以 "-" 兜底（原 parseModelFromBody 语义，现由
+// newChatStat 直接承接——调用方已一次 unmarshal 拿到 model，不再重复扫 body）。
+func TestChatStatModelFallback(t *testing.T) {
+	if got := newChatStat(time.Now(), "deepseek-v4-flash", true).model; got != "deepseek-v4-flash" {
 		t.Errorf("got %q", got)
 	}
-	if got := parseModelFromBody([]byte(`{}`)); got != "-" {
-		t.Errorf("got %q want -", got)
-	}
-	if got := parseModelFromBody([]byte(`not json`)); got != "-" {
+	if got := newChatStat(time.Now(), "", false).model; got != "-" {
 		t.Errorf("got %q want -", got)
 	}
 }

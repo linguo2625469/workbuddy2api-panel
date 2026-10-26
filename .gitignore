@@ -45,3 +45,6 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# 本地编译产物目录
+/bin/

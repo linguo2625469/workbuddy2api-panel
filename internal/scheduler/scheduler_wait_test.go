@@ -15,8 +15,8 @@ func newTestScheduler() *Scheduler {
 }
 
 // TestWaitSlotFiresAtWallclock 到点返回 slotFired：
-//  - next 已过（墙钟已越过时点、timer 尚未设置的形态）→ 立即返回，不等下一段；
-//  - next 未到（多段等待）→ 到点才返回，且不早于计划时刻。
+//   - next 已过（墙钟已越过时点、timer 尚未设置的形态）→ 立即返回，不等下一段；
+//   - next 未到（多段等待）→ 到点才返回，且不早于计划时刻。
 func TestWaitSlotFiresAtWallclock(t *testing.T) {
 	s := newTestScheduler()
 

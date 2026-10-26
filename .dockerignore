@@ -10,6 +10,7 @@ scripts/__pycache__/
 /credit
 /wb2api
 /signin_bin
+/bin/
 # 真实配置不进镜像（镜像默认用 config.example.json，生产以挂载卷覆盖）
 config.json
 PLAN.md

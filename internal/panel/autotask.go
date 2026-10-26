@@ -747,14 +747,6 @@ func taskProgressText(t *upstream.Task) string {
 	return t.AcceptStatus
 }
 
-// truncateStr 截断错误文本（避免把上游长响应原样透给前端）。
-func truncateStr(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
-}
-
 // ---------------------------------------------------------------------------
 // 各任务动作实现
 // ---------------------------------------------------------------------------
@@ -831,7 +823,7 @@ func runModelChat(p *Panel, a *auth.Auth) (string, error) {
 	}
 	if status >= 400 {
 		rc.Close()
-		return "", fmt.Errorf("对话失败 http=%d: %s", status, truncateStr(string(respBody), 160))
+		return "", fmt.Errorf("对话失败 http=%d: %s", status, logfmt.Truncate(string(respBody), 160))
 	}
 	// 读干 SSE（网关对上游强制 flow：不读完会残留连接）
 	_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))

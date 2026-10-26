@@ -37,8 +37,8 @@ func TestModelProbesEndpoint(t *testing.T) {
 	}
 	var got struct {
 		Probes    map[string]json.RawMessage `json:"probes"`
-		Exists    bool                        `json:"exists"`
-		UpdatedAt string                      `json:"updated_at"`
+		Exists    bool                       `json:"exists"`
+		UpdatedAt string                     `json:"updated_at"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
@@ -65,7 +65,7 @@ func TestModelProbesEndpoint(t *testing.T) {
 	}
 	var gotEmpty struct {
 		Probes map[string]json.RawMessage `json:"probes"`
-		Exists bool                        `json:"exists"`
+		Exists bool                       `json:"exists"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &gotEmpty); err != nil {
 		t.Fatal(err)

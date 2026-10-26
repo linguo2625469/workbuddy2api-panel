@@ -145,8 +145,8 @@ type messagesCitation struct {
 
 // messagesTextBlock 承载 citations 的文本块。
 type messagesTextBlock struct {
-	Type      string            `json:"type"`
-	Text      string            `json:"text"`
+	Type      string             `json:"type"`
+	Text      string             `json:"text"`
 	Citations []messagesCitation `json:"citations,omitempty"`
 }
 
@@ -158,13 +158,13 @@ type messagesUsage struct {
 
 // messagesResponse Anthropic Messages 响应。
 type messagesResponse struct {
-	ID           string `json:"id"`
-	Type         string `json:"type"`
-	Role         string `json:"role"`
-	Model        string `json:"model"`
-	Content      []any  `json:"content"`
-	StopReason   string `json:"stop_reason"`
-	StopSequence any    `json:"stop_sequence"`
+	ID           string        `json:"id"`
+	Type         string        `json:"type"`
+	Role         string        `json:"role"`
+	Model        string        `json:"model"`
+	Content      []any         `json:"content"`
+	StopReason   string        `json:"stop_reason"`
+	StopSequence any           `json:"stop_sequence"`
 	Usage        messagesUsage `json:"usage"`
 }
 

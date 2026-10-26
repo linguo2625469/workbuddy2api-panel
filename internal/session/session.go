@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -348,49 +349,86 @@ func hashIndex(key string, n int) int {
 // （user 维度粒度过粗——一个 user 的全部并行对话会被钉到同一账号），若派生路径不设
 // 此闸，只发 user_id 的请求会借内容哈希重新获得粘性，使该契约在 fallback 路径失效
 // （上游 #169 同款回归修正）。这类客户端回落加权轮换。
-func ExtractKey(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return ""
-	}
-	if meta, ok := obj["metadata"].(map[string]any); ok {
-		if v := strOrEmpty(meta["conversation_id"]); v != "" {
-			return v
-		}
-		if v := strOrEmpty(meta["conversationId"]); v != "" {
-			return v
-		}
-	}
-	if v := strOrEmpty(obj["conversation_id"]); v != "" {
-		return v
-	}
-	if v := strOrEmpty(obj["conversationId"]); v != "" {
-		return v
-	}
-	// 5. prompt_cache_key：OpenAI 系的会话级前缀缓存键，语义就是"同一会话复用同一
-	//    前缀"，与粘性诉求同源。放显式会话键之后、派生键之前，不抢占优先级。
-	if v := strOrEmpty(obj["prompt_cache_key"]); v != "" {
-		return v
-	}
-	// 派生回退闸：带 user 维度标识的请求不派生（契约见上）。
-	if hasUserIDKey(obj) {
-		return ""
-	}
-	return deriveKey(obj)
+// chatMessage 是单次解析里一条消息的最小投影：只取 role / content，content 保留
+// 原始字节（json 侧会拷贝，不别名 body），供会话键与轮键各自按需再解。
+type chatMessage struct {
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
-// hasUserIDKey 报告已解析 body 是否携带 user 维度标识（metadata.user_id 或顶层
-// user_id，非空字符串才算）。只用于派生回退闸（ExtractKey）；解析失败按无处理。
-func hasUserIDKey(obj map[string]any) bool {
-	if meta, ok := obj["metadata"].(map[string]any); ok {
-		if strOrEmpty(meta["user_id"]) != "" {
-			return true
+// chatRequest 是 ExtractKey / TurnKey 共同需要的请求体投影。标量字段一律用
+// RawMessage 承接（经 rawString 取串）：原 map[string]any 方案对"键存在但值非
+// 字符串/非对象"天然容忍（按零值跳过），强类型 struct 会在整个 Unmarshal 上报错
+// 从而误伤——RawMessage 逐字段取值把这份容忍原样保留。
+type chatRequest struct {
+	Metadata        json.RawMessage   `json:"metadata"`
+	ConversationID  json.RawMessage   `json:"conversation_id"`
+	ConversationID2 json.RawMessage   `json:"conversationId"`
+	PromptCacheKey  json.RawMessage   `json:"prompt_cache_key"`
+	UserID          json.RawMessage   `json:"user_id"`
+	Messages        []json.RawMessage `json:"messages"`
+}
+
+// RequestKeys 一次 unmarshal body 后同时派生会话键（ExtractKey）与轮级键
+// （TurnKey），供 handler 在 prompt.Rewrite 之前只扫一遍请求体（长历史消息是
+// 请求体里最大的部分，此前这两个函数各解一遍 map / struct，等于两趟全量解析）。
+// 返回的两个值与分别调用 ExtractKey / TurnKey 的结果逐字节一致（同一份投影、
+// 同一套优先级与签名口径，见两者的文档契约）。
+func RequestKeys(body []byte) (sessionKey, turnKey string) {
+	if len(body) == 0 {
+		return "", ""
+	}
+	var req chatRequest
+	if json.Unmarshal(body, &req) != nil {
+		return "", ""
+	}
+
+	// ---- 会话键：优先级与 ExtractKey 完全一致 ----
+	var meta map[string]json.RawMessage
+	if len(req.Metadata) > 0 {
+		_ = json.Unmarshal(req.Metadata, &meta) // 非对象 → nil，按无 metadata 处理
+	}
+	if v := rawString(meta["conversation_id"]); v != "" {
+		sessionKey = v
+	} else if v := rawString(meta["conversationId"]); v != "" {
+		sessionKey = v
+	} else if v := rawString(req.ConversationID); v != "" {
+		sessionKey = v
+	} else if v := rawString(req.ConversationID2); v != "" {
+		sessionKey = v
+	} else if v := rawString(req.PromptCacheKey); v != "" {
+		sessionKey = v
+	} else {
+		// 派生回退闸：带 user 维度标识的请求不派生（契约见 ExtractKey 文档）。
+		if rawString(meta["user_id"]) != "" || rawString(req.UserID) != "" {
+			sessionKey = ""
+		} else {
+			sessionKey = deriveKey(req.Messages)
 		}
 	}
-	return strOrEmpty(obj["user_id"]) != ""
+
+	// ---- 轮级键：最后一条 user 消息的「序号 + 内容签名」（口径同 TurnKey） ----
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		var m chatMessage
+		if json.Unmarshal(req.Messages[i], &m) != nil || m.Role != "user" {
+			continue
+		}
+		sig := contentSignature(m.Content)
+		if sig == "" {
+			// 最后一条 user 消息无可签名内容：本轮不建立聚合键，也不往前找
+			//（位置恒定，往前找会让键随 step 漂移——契约见 TurnKey 文档）。
+			return sessionKey, ""
+		}
+		return sessionKey, fmt.Sprintf("u%d:%s", i, sig)
+	}
+	return sessionKey, ""
+}
+
+// ExtractKey 从请求体提取会话键（只解一遍）。语义与优先级见 RequestKeys 上方
+// ExtractKey 的历史契约文档；本函数保留为薄包装供单测/潜在外部调用复用。
+func ExtractKey(body []byte) string {
+	k, _ := RequestKeys(body)
+	return k
 }
 
 // derivedKeyPrefix 派生键前缀，与显式会话 id 的命名空间隔离：
@@ -404,30 +442,29 @@ const derivedKeyPrefix = "d-"
 //   - system 与首条 user 在一次对话中恒定，足以区分不同对话；
 //   - 同一会话多轮请求 → 同一键 → 稳定粘住同一账号（上游 prompt 缓存命中）。
 //
-// 取不到用户文本（纯图片等）时返回空串：不粘性，退回普通轮换（安全降级）。
-func deriveKey(obj map[string]any) string {
-	msgs, ok := obj["messages"].([]any)
-	if !ok || len(msgs) == 0 {
+// 入参为已单条 RawMessage 化的 messages（跳过解不开的非对象元素，与旧 map
+// 方案的类型断言跳过同语义）。取不到用户文本（纯图片等）时返回空串：不粘性，
+// 退回普通轮换（安全降级）。
+func deriveKey(rawMsgs []json.RawMessage) string {
+	if len(rawMsgs) == 0 {
 		return ""
 	}
 	systemText, firstUserText := "", ""
-	for _, m := range msgs {
-		msg, ok := m.(map[string]any)
-		if !ok {
-			continue
+	for _, raw := range rawMsgs {
+		var m chatMessage
+		if json.Unmarshal(raw, &m) != nil {
+			continue // 非对象元素：与旧 map[string]any 的类型断言跳过一致
 		}
-		text := messageText(msg["content"])
-		switch strOrEmpty(msg["role"]) {
+		switch m.Role {
 		case "system", "developer":
 			if systemText == "" {
-				systemText = text
+				systemText = messageText(m.Content)
 			}
 		case "user":
 			if firstUserText == "" {
-				// 首条 user 用内容签名（ids.go contentSignature）而非纯文本提取：
-				// 纯图片轮（无 text part）在 messageText 下恒空串 → 派生键失效
-				//（首图会话的粘性盲区）；签名口径下图片 part 以 [type:摘要] 入键。
-				firstUserText = userContentSignature(msg["content"])
+				// 首条 user 用会话级稳定签名（[type] 占位、不入图片摘要——见
+				// userContentSignature 文档），纯图片轮也能派生出非空键。
+				firstUserText = userContentSignature(m.Content)
 			}
 		}
 		if firstUserText != "" && systemText != "" {
@@ -441,19 +478,15 @@ func deriveKey(obj map[string]any) string {
 	return derivedKeyPrefix + hex.EncodeToString(sum[:16])
 }
 
-// userContentSignature 把已解析的 content（any）转回 RawMessage 后取**会话级稳定**
-// 签名，供 deriveKey（粘性键）专用。与 TurnKey 的 contentSignature（全文摘）不同：
-// 文本 part 照常拼接；非文本 part 只入 "[type]" 占位**不入内容摘要**——同一逻辑
-// 图片的 URL 逐轮变化（签名 URL/重编码 base64）是真实场景，内容摘要入键会让
-// 派生键随轮漂移、粘性名存实亡（fork 既有契约：image url changes must not
-// break derived key stability）。占位仍能区分"有无图片/图片数量"，纯图片首条
-// 消息（无 text part）由此可派生非空键（首图会话粘性盲区修复，对齐上游 G1
-// 的目标语义而保留 fork 的稳定性口径）。marshal 失败按无内容处理（不伪造）。
-func userContentSignature(content any) string {
-	raw, err := json.Marshal(content)
-	if err != nil {
-		return ""
-	}
+// userContentSignature 取消息 content 的**会话级稳定**签名，供 deriveKey（粘性键）
+// 专用。与 TurnKey 的 contentSignature（全文摘）不同：文本 part 照常拼接；非文本
+// part 只入 "[type]" 占位**不入内容摘要**——同一逻辑图片的 URL 逐轮变化（签名
+// URL/重编码 base64）是真实场景，内容摘要入键会让派生键随轮漂移、粘性名存实亡
+// （fork 既有契约：image url changes must not break derived key stability）。占位
+// 仍能区分"有无图片/图片数量"，纯图片首条消息（无 text part）由此可派生非空键
+// （首图会话粘性盲区修复，对齐上游 G1 的目标语义而保留 fork 的稳定性口径）。
+// 形态异常按无内容处理（不伪造）。
+func userContentSignature(raw json.RawMessage) string {
 	st := strings.TrimSpace(string(raw))
 	if st == "" || st == "null" {
 		return ""
@@ -498,24 +531,46 @@ func userContentSignature(content any) string {
 
 // messageText 提取消息 content 的文本表示。
 // 兼容：字符串 / [{type:"text",text:"..."}] 数组（OpenAI 多模态）；其他类型取空。
-func messageText(content any) string {
-	switch v := content.(type) {
-	case string:
-		return v
-	case []any:
-		var sb strings.Builder
-		for _, part := range v {
-			if p, ok := part.(map[string]any); ok {
-				sb.WriteString(strOrEmpty(p["text"]))
-			}
-		}
-		return sb.String()
+func messageText(raw json.RawMessage) string {
+	st := strings.TrimSpace(string(raw))
+	if st == "" || st == "null" {
+		return ""
 	}
-	return ""
+	if st[0] == '"' {
+		var str string
+		if json.Unmarshal(raw, &str) != nil {
+			return ""
+		}
+		return str
+	}
+	if st[0] != '[' {
+		return ""
+	}
+	var parts []json.RawMessage
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, pr := range parts {
+		var p struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(pr, &p) == nil {
+			sb.WriteString(p.Text)
+		}
+	}
+	return sb.String()
 }
 
-// strOrEmpty 把 JSON 字符串字段安全转 string（非字符串类型返回空）。
-func strOrEmpty(v any) string {
-	s, _ := v.(string)
+// rawString 从 JSON 标量原始字节取字符串值；字段缺失（nil）、null 或非字符串
+// 形态一律返回 ""（等价旧 map[string]any + strOrEmpty 的容忍语义）。
+func rawString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
 	return s
 }

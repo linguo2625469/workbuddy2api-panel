@@ -332,44 +332,26 @@ func parseMarkupParams(body string) (string, bool) {
 	return string(out), true
 }
 
-// ToolNameAllowlist 从客户端请求体里收集「可用于判定工具调用」的工具名集合。
+// ChatToolDecl 是请求体顶层工具声明的投影（OpenAI/Responses/旧版 functions 三形态）。
+// 导出供 server 侧单次解析投影复用（chatPeek.Tools / Functions）。
+type ChatToolDecl struct {
+	Name     string `json:"name"`
+	Function *struct {
+		Name string `json:"name"`
+	} `json:"function"`
+}
+
+// ToolNamesFromPeek 从**已解析**的请求投影收集工具名集合（语义与
+// ToolNameAllowlist 完全一致，区别只是不再重新 unmarshal 整份 body——handler 侧
+// 已为别的诉求扫过一遍，长历史消息重扫是热路径上的纯浪费）。
 //
-// 两个来源都要，因为二者会分别缺失：
-//  1. 本请求声明的工具：OpenAI tools[].function.name、Responses 风格裸 tools[].name、
-//     旧版 functions[].name。tools 声明在中转环节丢失是实测常态。
-//  2. 会话历史里出现过的工具：messages[].tool_calls[].function.name 与旧版
-//     messages[].function_call.name。多轮会话里这份名单几乎总在，且天然可信——
-//     它是客户端自己写进历史的工具名。
+// tools/functions 取顶层声明；messages 为逐条 RawMessage，本函数只解 tool_calls /
+// function_call 两个字段，解不开的畸形条目跳过。
 //
-// 两个来源都为空 → 返回 nil，由调用方决定是否启用弱判定（见 NewMarkupRepair）。
-// 解析失败按空处理（不编造名单）。
-func ToolNameAllowlist(body []byte) map[string]bool {
-	var req struct {
-		Tools []struct {
-			Name     string `json:"name"`
-			Function *struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
-		Functions []struct {
-			Name string `json:"name"`
-		} `json:"functions"`
-		Messages []struct {
-			ToolCalls []struct {
-				Function *struct {
-					Name string `json:"name"`
-				} `json:"function"`
-			} `json:"tool_calls"`
-			FunctionCall *struct {
-				Name string `json:"name"`
-			} `json:"function_call"`
-		} `json:"messages"`
-	}
-	if json.Unmarshal(body, &req) != nil {
-		return nil
-	}
+// 两个来源都为空 → 返回 nil（由调用方决定是否启用弱判定，见 NewMarkupRepair）。
+func ToolNamesFromPeek(tools, functions []ChatToolDecl, messages []json.RawMessage) map[string]bool {
 	names := map[string]bool{}
-	for _, t := range req.Tools {
+	for _, t := range tools {
 		if t.Function != nil && t.Function.Name != "" {
 			names[t.Function.Name] = true
 			continue
@@ -378,12 +360,25 @@ func ToolNameAllowlist(body []byte) map[string]bool {
 			names[t.Name] = true
 		}
 	}
-	for _, f := range req.Functions {
+	for _, f := range functions {
 		if f.Name != "" {
 			names[f.Name] = true
 		}
 	}
-	for _, m := range req.Messages {
+	for _, raw := range messages {
+		var m struct {
+			ToolCalls []struct {
+				Function *struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+			FunctionCall *struct {
+				Name string `json:"name"`
+			} `json:"function_call"`
+		}
+		if json.Unmarshal(raw, &m) != nil {
+			continue
+		}
 		for _, tc := range m.ToolCalls {
 			if tc.Function != nil && tc.Function.Name != "" {
 				names[tc.Function.Name] = true
@@ -397,6 +392,31 @@ func ToolNameAllowlist(body []byte) map[string]bool {
 		return nil
 	}
 	return names
+}
+
+// ToolNameAllowlist 从客户端请求体里收集「可用于判定工具调用」的工具名集合。
+//
+// 两个来源都要，因为二者会分别缺失：
+//  1. 本请求声明的工具：OpenAI tools[].function.name、Responses 风格裸 tools[].name、
+//     旧版 functions[].name。tools 声明在中转环节丢失是实测常态。
+//  2. 会话历史里出现过的工具：messages[].tool_calls[].function.name 与旧版
+//     messages[].function_call.name。多轮会话里这份名单几乎总在，且天然可信——
+//     它是客户端自己写进历史的工具名。
+//
+// 两个来源都为空 → 返回 nil，由调用方决定是否启用弱判定（见 NewMarkupRepair）。
+// 解析失败按空处理（不编造名单）。
+//
+// 仅需工具名且手上已有解析投影的热路径应直接调 ToolNamesFromPeek，不要再扫 body。
+func ToolNameAllowlist(body []byte) map[string]bool {
+	var req struct {
+		Tools     []ChatToolDecl    `json:"tools"`
+		Functions []ChatToolDecl    `json:"functions"`
+		Messages  []json.RawMessage `json:"messages"`
+	}
+	if json.Unmarshal(body, &req) != nil {
+		return nil
+	}
+	return ToolNamesFromPeek(req.Tools, req.Functions, req.Messages)
 }
 
 // RepairAggregatedResponse 在非流式聚合响应里把正文中的标记还原为 tool_calls。

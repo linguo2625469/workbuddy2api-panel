@@ -34,6 +34,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # gofmt 门禁：历史上 21 个文件长期不合规而 CI 只跑 go test，格式债无人拦。
+      # gofmt -l 只列不合规文件（无输出即通过），改完再跑测试。
+      - name: gofmt
+        run: |
+          bad=$(gofmt -l .)
+          if [ -n "$bad" ]; then
+            echo "::error::以下文件 gofmt 不合规，请本地 gofmt -w . 后提交："
+            echo "$bad"
+            exit 1
+          fi
+      # go vet：类型/引用/并发误用的静态检查，与 gofmt 同为廉价前置门禁。
+      - run: go vet ./...
       # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
       - run: go test ./...
 

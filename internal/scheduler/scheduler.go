@@ -15,6 +15,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/xtime"
 )
 
 // Config 调度器依赖。
@@ -305,6 +306,9 @@ func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
 // travelAccountDelay「测试可置 0」同口径）。
 var wakeupGraceDelay = 5 * time.Second
 
+// balanceRefreshConcurrency RunBalanceRefreshNow 的并发上限（每账号一路上游请求）。
+const balanceRefreshConcurrency = 8
+
 // wakeupLateThreshold 迟到判定阈值：now 晚于槽位计划时刻超过 1s 才算迟到补跑。
 // 毫秒级抖动（timer 正常触发的偏移量级）不算，避免准点触发被误宽限。
 const wakeupLateThreshold = 1 * time.Second
@@ -318,7 +322,7 @@ func awaitWakeupGrace(ctx context.Context, planned time.Time) bool {
 		return ctx.Err() == nil // 准点触发：零延迟放行
 	}
 	log.Printf("wakeup grace %s: late catch-up for slot %s", wakeupGraceDelay, planned.Format("15:04"))
-	return sleepCtx(ctx, wakeupGraceDelay)
+	return xtime.SleepCtx(ctx, wakeupGraceDelay)
 }
 
 // wallclockCheckStep 墙钟校验段长：等待槽位时单次 timer 的最大时长，每段醒来用
@@ -441,22 +445,6 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 	wg.Wait()
 }
 
-// sleepCtx 可取消的等待：ctx 取消立即返回 false（优雅停机不必等限速睡醒），
-// 等满返回 true。d<=0 立即放行。
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
-}
-
 // RunCheckinNow 立即对所有账号执行签到 + 余额刷新 + 解冻。
 // 冷却中的账号也参与（签到就是为了解冻它们）；禁用账号默认跳过——
 // 若 schedule.include_disabled_in_tasks 打开则一并执行（禁用只关选号，不停保号）。
@@ -561,7 +549,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 判断不成立——国际版 /v2/report 可用，跳过即国际版账号永远点不亮连登（上游
 		// a190252 同口径修复）。checkin/travel 的 global 门控不受影响，仍跳过。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !xtime.SleepCtx(ctx, activityAccountDelay) {
 				return // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
@@ -654,6 +642,10 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 	var wg sync.WaitGroup
 	expiringSoon := s.ExpiringSoonWindow()
 	includeDisabled := s.includeDisabledInTasks()
+	// 并发上限：此前每个账号直接起一个 goroutine，账号池大时会同时打出等量上游
+	// 请求（易触发上游频控，也放大重试风暴）。与 redisstore.writeConcurrencyLimit
+	// 同量级取 8，账号再多也只保持 8 路在途。
+	sem := make(chan struct{}, balanceRefreshConcurrency)
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
 			continue
@@ -662,9 +654,11 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 		if a == nil {
 			continue
 		}
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(a *auth.Auth, uid string) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			remain, total, expiring, earliestAt, earliestRemaining, buckets, err := s.cfg.Upstream.UserResourceSnapshot(a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
@@ -679,7 +673,7 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 				EarliestRemaining: earliestRemaining,
 				ExpiryBuckets:     poolExpiryBuckets(buckets),
 			})
-			}(a, st.UID)
+		}(a, st.UID)
 	}
 	wg.Wait()
 	s.lastBalanceRefresh.Store(time.Now().UnixNano())

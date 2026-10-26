@@ -264,6 +264,13 @@ function rateLimitMeta(row, now) {
     };
   }
   const title = [model, resetAt ? '上游重置：' + fmtLocalDateTime(resetAt) : '上游重置：时间未知'];
+  // detail 必须在分支外声明（issue #241）：app.js 首行是 'use strict'，严格模式下
+  // 给未声明变量赋值抛 ReferenceError（不会建全局变量）。此前挪进 else 分支时丢了
+  // 声明，于是只要账号存在未到期的模型级限流记录（kind='rate_limit'），
+  // renderAccounts() 的 map 回调就抛错 → innerHTML 一次都没写入 → 账号池表体空白；
+  // renderModelLocks() 排在同一 try 块之后，跟着一起空；统计卡片在它之前已赋值完，
+  // 于是呈现「统计正常、表格空白、控制台干净」的假象（轮询 quiet=true 还被静默吞掉）。
+  let detail;
   if (until && resetAt && until < resetAt) {
     // 双时钟（issue #171 问题二）：黄框出现/消失由 until 决定（网关为防超长
     // 限流拖死全池，把重试封顶在 now+softRateMax），主文字却按 resetAt 显示，
@@ -531,7 +538,16 @@ async function loadOverview(quiet) {
     // 「检查」之后卡片永远停在那一刻的旧数据。
     const liveFresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
     if ($('expBox') && !liveFresh) renderExpirySnapshot(d);
-  } catch (e) { if (!quiet) toast(e.message, 'err'); }
+  } catch (e) {
+    // 渲染类异常不再静默（issue #241）：两表渲染异常曾被 quiet 模式的 catch 完整
+    // 吞掉，表现为「统计正常、表格空白、控制台无报错」，排查全靠反推。渲染异常打
+    // console.error 留痕；网络类错误在轮询时保持静默（抖动无需刷屏，非代码缺陷）。
+    if (e && (e instanceof ReferenceError || e.name === 'TypeError')) {
+      console.error('[panel] 渲染异常', e);
+    } else if (!quiet) {
+      toast(e.message, 'err');
+    }
+  }
 }
 
 $('accBody').addEventListener('click', async ev => {

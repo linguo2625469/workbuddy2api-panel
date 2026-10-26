@@ -17,33 +17,6 @@ import (
 	"strings"
 )
 
-// ResolveConversationID 从请求体提取会话头族的 conversationId（snake/camel 双形态，
-// 复用 ExtractKey 的识别顺序：metadata 优先、snake 优先于 camel）。
-// 与 ExtractKey 的差异：**只认 conversationId，绝不回落 user_id**——X-Conversation-ID
-// 语义是"对话 ID"，user_id 回落会污染后台按对话聚合的判据。
-// 缺失返回 ""（不伪造：透传客户端原值优先，客户端没给就不发）。
-func ResolveConversationID(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return ""
-	}
-	if meta, ok := obj["metadata"].(map[string]any); ok {
-		if v := strOrEmpty(meta["conversation_id"]); v != "" {
-			return v
-		}
-		if v := strOrEmpty(meta["conversationId"]); v != "" {
-			return v
-		}
-	}
-	if v := strOrEmpty(obj["conversation_id"]); v != "" {
-		return v
-	}
-	return strOrEmpty(obj["conversationId"])
-}
-
 // NewMessageID 生成消息级 ID：32 位 hex（UUID v4 去横线的长度形态），对齐官方
 // X-Request-ID / X-Conversation-Message-ID。crypto/rand 失败（理论上不可能）时回落
 // math/rand/v2 双 uint64 拼 32 hex——恒 32 hex、恒合法，可安全用作 B3 TraceId。
@@ -96,31 +69,8 @@ func RequestIDForKey(key string) string {
 // 无 body / 无 messages / 无 user 消息 / 该消息无文本 → ""（调用方回落请求级随机
 // ID，不伪造聚合键）。
 func TurnKey(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
-	var obj struct {
-		Messages []struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		} `json:"messages"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return ""
-	}
-	for i := len(obj.Messages) - 1; i >= 0; i-- {
-		if obj.Messages[i].Role != "user" {
-			continue
-		}
-		sig := contentSignature(obj.Messages[i].Content)
-		if sig == "" {
-			// 最后一条 user 消息没有可签名内容（空/null/空 parts）→ 本轮不建立聚合键。
-			// 不继续往前找：整轮内该消息位置恒定，往前找反而会让键随 step 漂移。
-			return ""
-		}
-		return fmt.Sprintf("u%d:%s", i, sig)
-	}
-	return ""
+	_, k := RequestKeys(body)
+	return k
 }
 
 // contentText 取消息 content 的文本：字符串形态直接返回；数组形态（多模态 parts）

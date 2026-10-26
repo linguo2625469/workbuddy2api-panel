@@ -40,9 +40,9 @@ func TestOverviewIncludesExpiryBuckets(t *testing.T) {
 		t.Fatalf("overview status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		BalanceRefreshSec   int       `json:"balance_refresh_sec"`
-		BalanceRefreshedAt  time.Time `json:"balance_refreshed_at"`
-		Accounts            []struct {
+		BalanceRefreshSec  int       `json:"balance_refresh_sec"`
+		BalanceRefreshedAt time.Time `json:"balance_refreshed_at"`
+		Accounts           []struct {
 			CreditsExpiryBuckets []pool.ExpiryBucket `json:"credits_expiry_buckets"`
 		} `json:"accounts"`
 	}

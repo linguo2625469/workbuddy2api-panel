@@ -80,12 +80,12 @@ func TestAppJSCompGateMutationDiscriminates(t *testing.T) {
 		t.Skip("node not installed; compensation mutation test skipped")
 	}
 	mutants := map[string]struct{ from, to string }{
-		"drop !r.skip":     {"!r.skip && ", ""},
-		"drop !r.error":    {"!r.error && ", ""},
-		"drop r.active":    {"r.status.active && ", ""},
-		"drop !claimed":    {"!r.status.claimed && ", ""},
-		"drop credit>0":    {"(r.status.credit_num || 0) > 0", "true"},
-		"drop whole status":{"r.status &&", "true &&"},
+		"drop !r.skip":      {"!r.skip && ", ""},
+		"drop !r.error":     {"!r.error && ", ""},
+		"drop r.active":     {"r.status.active && ", ""},
+		"drop !claimed":     {"!r.status.claimed && ", ""},
+		"drop credit>0":     {"(r.status.credit_num || 0) > 0", "true"},
+		"drop whole status": {"r.status &&", "true &&"},
 	}
 	for name, m := range mutants {
 		t.Run(name, func(t *testing.T) {
@@ -185,7 +185,7 @@ process.stdout.write(JSON.stringify({
 	}
 	got := strings.TrimSpace(string(out))
 	for _, must := range []string{
-		`"text":"剩 6 小时","urgent":true`,       // ≤48h 必须标临期
+		`"text":"剩 6 小时","urgent":true`,      // ≤48h 必须标临期
 		`"text":"剩 3 天 0 小时","urgent":false`, // 3 天不算临期
 		`"text":"已截止","urgent":true`,
 		`"text":"无截止信息","urgent":false`,

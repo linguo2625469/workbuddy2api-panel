@@ -75,12 +75,17 @@ type chatStat struct {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
+// model 为空时日志列以 "-" 兜底（此前由 parseModelFromBody 负责，现由调用方一次
+// unmarshal 后直接给出——避免为取一个字段再扫一遍整 body）。
+func newChatStat(now time.Time, model string, stream bool) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	if model == "" {
+		model = "-"
+	}
+	return &chatStat{start: now, model: model, mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志。
@@ -275,17 +280,6 @@ func rewriteModel(body []byte, bare string) []byte {
 	return out
 }
 
-// parseModelFromBody 从请求 JSON 取 model 字段，缺省标 "-"。
-func parseModelFromBody(body []byte) string {
-	var obj struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil || obj.Model == "" {
-		return "-"
-	}
-	return obj.Model
-}
-
 // cacheTokensFromUsage 从非流式聚合响应的 usage 里提取缓存命中 / 未命中 token
 // 数，与流式侧 CacheTokens 的推导口径对称：hit 不可得（缺失或 0）但 miss 显式
 // 存在时，按 prompt - miss 反推 hit（issue #170）；prompt <= miss 时保持 hit=0
@@ -379,7 +373,7 @@ type requestTrace struct {
 	// model 非 chat 路径的模型标识（搜索写 "WorkBuddy搜索工具"）。chat 路径由
 	// chatStat.model 覆盖，二者不会同时生效。
 	model string
-	stat    *chatStat
+	stat  *chatStat
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string

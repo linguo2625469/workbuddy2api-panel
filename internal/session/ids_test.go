@@ -15,11 +15,12 @@ func imagePartSig(t *testing.T, part string) string {
 	return hex.EncodeToString(sum[:4])
 }
 
-// TestResolveConversationID 覆盖 conversationId 提取的 snake/camel/缺失三态：
+// TestExtractKeyConversationIDs 会话 ID 的 snake/camel/缺失三态（会话头族的
+// conversationID 直接取 ExtractKey 结果，故在此钉住其识别顺序）：
 //   - metadata.conversation_id / metadata.conversationId → 取值
-//   - 顶层 conversation_id / conversationId → 取值（snake 优先同 ExtractKey）
+//   - 顶层 conversation_id / conversationId → 取值（snake 优先）
 //   - 缺失 / 只有 user_id → ""（会话头族语义只认对话 ID，绝不回落 user_id）
-func TestResolveConversationID(t *testing.T) {
+func TestExtractKeyConversationIDs(t *testing.T) {
 	cases := []struct {
 		name string
 		body string
@@ -30,18 +31,15 @@ func TestResolveConversationID(t *testing.T) {
 		{"top-level snake_case", `{"conversation_id":"conv-3"}`, "conv-3"},
 		{"top-level camelCase", `{"conversationId":"conv-4"}`, "conv-4"},
 		{"snake wins over camel", `{"conversation_id":"conv-s","conversationId":"conv-c"}`, "conv-s"},
-		{"missing", `{"model":"glm-5.2"}`, ""},
 		{"empty body", ``, ""},
 		{"broken json", `{broken`, ""},
-		{"metadata user_id only", `{"metadata":{"user_id":"u1"}}`, ""},
-		{"top-level user_id only", `{"user_id":"u1"}`, ""},
 		{"empty string value", `{"conversationId":""}`, ""},
 		{"non-string value", `{"conversationId":123}`, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := ResolveConversationID([]byte(c.body)); got != c.want {
-				t.Errorf("ResolveConversationID(%q) = %q want %q", c.body, got, c.want)
+			if got := ExtractKey([]byte(c.body)); got != c.want {
+				t.Errorf("ExtractKey(%q) = %q want %q", c.body, got, c.want)
 			}
 		})
 	}
@@ -142,6 +140,41 @@ func TestTurnRequestIDDerivation(t *testing.T) {
 	for _, id := range []string{a1, TurnRequestID(""), TurnRequestID("x")} {
 		if len(id) != 32 {
 			t.Errorf("TurnRequestID value %q len=%d want 32", id, len(id))
+		}
+	}
+}
+
+// TestRequestKeysMatchesSeparateCalls 钉住合并解析的等价契约：RequestKeys 返回的
+// 两个键必须与分别调用 ExtractKey / TurnKey 的结果逐字节一致——任何 RawMessage
+// 投影/逐条解码的重构都不允许在畸形值、多模态、user_id 闸、派生回退上漂移。
+func TestRequestKeysMatchesSeparateCalls(t *testing.T) {
+	bodies := []string{
+		``,
+		`{broken`,
+		`{}`,
+		`{"model":"glm-x","stream":true}`,
+		`{"metadata":{"conversation_id":"c1"},"messages":[{"role":"user","content":"hi"}]}`,
+		`{"metadata":{"conversationId":"c2"},"messages":[{"role":"user","content":[{"type":"text","text":"看图"},{"type":"image_url","image_url":{"url":"data:abc"}}]}]}`,
+		`{"conversation_id":"c3","messages":[{"role":"system","content":"sys"},{"role":"user","content":"u1"},{"role":"user","content":"u2"}]}`,
+		`{"conversationId":123,"messages":[{"role":"user","content":"x"}]}`,
+		`{"metadata":{"user_id":"uid"},"messages":[{"role":"system","content":"s"},{"role":"user","content":"u"}]}`,
+		`{"user_id":"uid","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}]}`,
+		`{"prompt_cache_key":"pk-1","messages":[{"role":"user","content":""}]}`,
+		`{"messages":[{"role":"system","content":"sys"},{"role":"user","content":"first"},{"role":"assistant","content":"a"},{"role":"user","content":"second"}]}`,
+		`{"messages":["str-element",{"role":"user","content":"ok"}]}`,
+		`{"messages":[{"role":"user","content":null}]}`,
+		`{"metadata":"not-an-object","conversation_id":"c9"}`,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"a"}]},{"role":"tool","content":"r"}]}`,
+	}
+	for _, body := range bodies {
+		sk, tk := RequestKeys([]byte(body))
+		wantSK := ExtractKey([]byte(body))
+		wantTK := TurnKey([]byte(body))
+		if sk != wantSK {
+			t.Errorf("RequestKeys(%q) sessionKey=%q want ExtractKey=%q", body, sk, wantSK)
+		}
+		if tk != wantTK {
+			t.Errorf("RequestKeys(%q) turnKey=%q want TurnKey=%q", body, tk, wantTK)
 		}
 	}
 }

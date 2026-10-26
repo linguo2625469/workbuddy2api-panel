@@ -26,6 +26,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/xtime"
 )
 
 // Config handler 依赖。
@@ -551,6 +552,22 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// chatPeek 一次 unmarshal 取出的请求事实（model / stream / messages / tools）。
+//
+// 为什么合并：此前 peek、parseModelFromBody、hasImagePart、ToolNameAllowlist、
+// session.ExtractKey/TurnKey 各自完整 unmarshal 一遍 body——同一请求最多七趟全量
+// 扫描，而 messages 正是请求体里最大的部分。现在 server/session/upstream 三条链路
+// 各自消费同一份 RawMessage 投影，大提示词下整 body 扫描降到一趟。
+// messages 保留为 RawMessage 切片（json 侧会拷贝，不别名 body）：hasImagePart 只
+// 解数组形态的 content；且逐条解能跳过非对象/畸形元素，不连累 model/stream 提取。
+type chatPeek struct {
+	Model     string                  `json:"model"`
+	Stream    bool                    `json:"stream"`
+	Messages  []json.RawMessage       `json:"messages"`
+	Tools     []upstream.ChatToolDecl `json:"tools"`
+	Functions []upstream.ChatToolDecl `json:"functions"`
+}
+
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
@@ -564,10 +581,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	var peek struct {
-		Stream bool   `json:"stream"`
-		Model  string `json:"model"`
-	}
+	var peek chatPeek
 	_ = json.Unmarshal(body, &peek)
 
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
@@ -575,7 +589,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 与「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
 	// 只认前者会让修复层在最需要它的场景下失效。
 	// 在提示词/模型名改写之前取（那些改写不动 tools / messages[].tool_calls 子树）。
-	declaredTools := upstream.ToolNameAllowlist(body)
+	declaredTools := upstream.ToolNamesFromPeek(peek.Tools, peek.Functions, peek.Messages)
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
@@ -592,7 +606,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	crossRealm := !realmExplicit && h.cfg.Pool.CrossDomainFallback()
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	st := newChatStat(time.Now(), body, peek.Stream)
+	st := newChatStat(time.Now(), peek.Model, peek.Stream)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
@@ -620,7 +634,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
-	sessKey := session.ExtractKey(body)
+	// 会话键 + 轮级键一次解析（此前 ExtractKey / TurnKey 各完整 unmarshal 一遍
+	// body——长历史消息占请求体绝大部分，两趟全量扫描合并为一趟）。
+	sessKey, turnKey := session.RequestKeys(body)
 	stickyUID := ""
 	if h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
@@ -634,17 +650,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 轮级聚合键：按 body 里最后一条 user 消息派生（同轮内所有上游调用同键，
-	// 换 user 消息换键）。#170 起带会话键的客户端也统一走轮级（对齐官方桌面 CLI
-	// 的 X-Conversation-Request-ID 轮级语义——TraceStartHook 每次 USER_PROMPT_SUBMIT
-	// 清空重生成），故不再限 sessKey=="" 才计算；sessKey 由下方派生处以复合键方式
-	// 入键（防不同会话同轮文本互撞）。
-	// 必须在下方 prompt.Rewrite 之前取——改写会动 messages 内容，之后取会让键漂移。
-	turnKey := session.TurnKey(body)
+	// turnKey 必须在下方 prompt.Rewrite 之前取（已在上方与 sessKey 一并解析）：
+	// 改写会动 messages 内容，之后取会让键漂移。
 
 	// gateway_hint 判定所需的请求形态（image_url part）：在改写前取（与 turnKey
 	// 同理）。11133「模型不支持图片」指向的前提。
-	reqHasImage := hasImagePart(body)
+	reqHasImage := hasImagePart(peek)
 
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
 	var heldUID string
@@ -771,7 +782,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 循环外**生成一次，循环内每次出站原样复用 → 换号/重试/降级全部同 ID，后台不再
 	// 碎片化（此前网关一个都不发，上游按 HTTP 请求逐条记账，同一对话几十上百个
 	// RequestID）。
-	//   - conversationID：body 提取（透传客户端原值，缺省空串——不伪造）；
+	//   - conversationID：直接用 sessKey（Equal 性见下）；
 	//   - conversationRequestID：入站 X-Conversation-Request-ID 透传优先，否则按
 	//     粘性 key 进程内稳定生成；粘性 key 也空时走轮级兜底（TurnKey/TurnRequestID），
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
@@ -781,11 +792,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// the upstream prompt_cache_key degrades into one constant per account and
 	// every client on that account ends up sharing a single, constantly evicted
 	// prefix-cache slot.
-	convID := session.ResolveConversationID(body)
-	if convID == "" {
-		convID = sessKey
-	}
-	chatMeta := upstream.ChatMeta{ConversationID: convID}
+	// 原为 session.ResolveConversationID(body)，空则回落 sessKey。该函数检查的四个
+	// 键（metadata.conversation_id / conversationId / 顶层两个）正是 ExtractKey 的
+	// 前四步且顺序一致，故其非空结果恒等于 sessKey——回落分支永不可达。删掉这次
+	// 重复的整 body unmarshal，直接复用 sessKey（大提示词请求少扫一遍全 body）。
+	chatMeta := upstream.ChatMeta{ConversationID: sessKey}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
@@ -1377,7 +1388,7 @@ func rotateBackoff(i int, ctx context.Context) bool {
 	if d <= 0 {
 		return ctx.Err() == nil
 	}
-	if !sleepCtx(ctx, d) {
+	if !xtime.SleepCtx(ctx, d) {
 		log.Printf("WARN: [server] rotate backoff aborted: ctx cancelled")
 		return false
 	}
@@ -1595,22 +1606,27 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 	})
 }
 
-// hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
-// messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
-// 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
-func hasImagePart(body []byte) bool {
-	var peek struct {
-		Messages []struct {
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
-		} `json:"messages"`
-	}
-	if json.Unmarshal(body, &peek) != nil {
-		return false
-	}
-	for _, m := range peek.Messages {
-		for _, p := range m.Content {
+// hasImagePart 报告聊天请求是否携带多模态 image_url part（OpenAI 兼容形态
+// messages[].content[] {type:"image_url"}）；content 为纯字符串或其它形态一律 false
+// （hint 侧宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
+// 消费已解析好的 peek（不再整 body unmarshal 一遍）。
+func hasImagePart(peek chatPeek) bool {
+	for _, raw := range peek.Messages {
+		var m struct {
+			Content json.RawMessage `json:"content"`
+		}
+		// 非对象元素跳过：不能因为一条畸形消息让整个 image 判定失效。
+		if json.Unmarshal(raw, &m) != nil {
+			continue
+		}
+		// 数组形态的 content（多模态 parts）；纯字符串 content 解不出即跳过。
+		var parts []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(m.Content, &parts) != nil {
+			continue
+		}
+		for _, p := range parts {
 			if p.Type == "image_url" {
 				return true
 			}

@@ -23,29 +23,21 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 )
 
-const (
-	upstreamBaseCN      = "https://copilot.tencent.com"
-	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originRefererCN     = "https://www.codebuddy.cn"
-	originRefererGlobal = "https://www.workbuddy.ai"
-)
-
 // loginEndpoints 按 realm 返回设备授权三端点（auth/state、token、account）+ Origin。
 // realm=="global" → 国际版（workbuddy.ai 同域）；cn/非法/缺省 → CN（零回归）。
 func loginEndpoints(realm string) (state, token, account, origin string) {
 	if realm == "global" {
-		base := upstreamBaseGlobal
+		base := auth.UpstreamBaseGlobal
 		return base + "/v2/plugin/auth/state?platform=CLI",
 			base + "/v2/plugin/auth/token?state=",
 			base + "/v2/plugin/login/account?state=",
-			originRefererGlobal
+			auth.OriginRefererGlobal
 	}
-	base := upstreamBaseCN
+	base := auth.UpstreamBaseCN
 	return base + "/v2/plugin/auth/state?platform=CLI",
 		base + "/v2/plugin/auth/token?state=",
 		base + "/v2/plugin/login/account?state=",
-		originRefererCN
+		auth.OriginRefererCN
 }
 
 // loginHTTP 设备授权专用 client：短超时、无 cookie（每请求携带 state，无会话态）。
@@ -57,7 +49,7 @@ func commonHeaders(req *http.Request, origin string) {
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("Origin", origin)
 	req.Header.Set("Referer", origin+"/")
-	req.Header.Set("User-Agent", clientUA)
+	req.Header.Set("User-Agent", auth.ClientUA)
 }
 
 // validUID 校验上游返回的 uid 是否可安全用于拼文件名。

@@ -35,13 +35,6 @@ import (
 
 // 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
 // （base 与 Origin/Referer 同域）。端点 URL 由 realmConfig 按 realm 动态拼出，不再硬编码。
-const (
-	upstreamBaseCN      = "https://copilot.tencent.com"
-	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
-	originRefererCN     = "https://www.codebuddy.cn"
-	originRefererGlobal = "https://www.workbuddy.ai"
-)
 
 // 登录 state 落盘路径（var 便于测试替换临时文件）
 // Portable across OSes: the upstream hardcoded "/tmp/...", which on
@@ -56,9 +49,9 @@ var exitFunc = os.Exit
 // (www.workbuddy.ai, www.workbuddy.ai)；cn/非法/缺省 → (copilot.tencent.com, codebuddy.cn)。
 func realmConfig(realm string) (base, origin string) {
 	if realm == realmGlobal {
-		return upstreamBaseGlobal, originRefererGlobal
+		return auth2.UpstreamBaseGlobal, auth2.OriginRefererGlobal
 	}
-	return upstreamBaseCN, originRefererCN
+	return auth2.UpstreamBaseCN, auth2.OriginRefererCN
 }
 
 // commonHeaders 按 origin 设置通用请求头（Origin/Referer 随 realm 变化）。
@@ -70,7 +63,7 @@ func commonHeaders(origin string) func(*http.Request) {
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Referer", origin+"/")
-		req.Header.Set("User-Agent", clientUA)
+		req.Header.Set("User-Agent", auth2.ClientUA)
 	}
 }
 
@@ -91,7 +84,7 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 		headers(req)
 	} else {
 		// 缺省头：CN origin（与原 commonHeaders() 行为一致，零回归）
-		commonHeaders(originRefererCN)(req)
+		commonHeaders(auth2.OriginRefererCN)(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

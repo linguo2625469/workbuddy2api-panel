@@ -3,6 +3,7 @@ package reqlog
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -23,6 +24,34 @@ func TestRecorderMetricsAndRecent(t *testing.T) {
 	}
 	if len(s.Recent) != 2 || s.Recent[0].RequestID != "bad" || s.Recent[1].RequestID != "ok" {
 		t.Fatalf("recent = %+v, want newest first", s.Recent)
+	}
+}
+
+// 环形缓冲写入超过 recentLimit 后必须环绕：仍是最新在前、条数封顶、且保留的
+// 恰好是最后 recentLimit 条。此处覆盖 old→new 的头插实现不会走到的环绕分支。
+func TestRecentRingWraps(t *testing.T) {
+	r := New(Config{})
+	total := recentLimit + 37
+	for i := 0; i < total; i++ {
+		r.Record(Event{RequestID: "e" + strconv.Itoa(i), Status: 200, OK: true})
+	}
+	s := r.Snapshot()
+	if len(s.Recent) != recentLimit {
+		t.Fatalf("recent len = %d, want %d", len(s.Recent), recentLimit)
+	}
+	// 最新在前：首条应是最后写入的 e<total-1>。
+	if want := "e" + strconv.Itoa(total-1); s.Recent[0].RequestID != want {
+		t.Fatalf("recent[0] = %q, want %q", s.Recent[0].RequestID, want)
+	}
+	// 最旧一条应是窗口内最早的 e<total-recentLimit>。
+	if want := "e" + strconv.Itoa(total-recentLimit); s.Recent[recentLimit-1].RequestID != want {
+		t.Fatalf("recent[last] = %q, want %q", s.Recent[recentLimit-1].RequestID, want)
+	}
+	// 顺序严格递减（新→旧），无重复无空洞。
+	for i := 0; i < recentLimit; i++ {
+		if want := "e" + strconv.Itoa(total-1-i); s.Recent[i].RequestID != want {
+			t.Fatalf("recent[%d] = %q, want %q", i, s.Recent[i].RequestID, want)
+		}
 	}
 }
 

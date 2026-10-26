@@ -1158,7 +1158,7 @@ func TestSaveFailureRecordedAndRecovers(t *testing.T) {
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetCredits("u1", 42, 0)
 	p.Flush()
-	if p.persistFails == 0 {
+	if p.persistFails.Load() == 0 {
 		t.Fatal("persist failure should be recorded (visible), got 0")
 	}
 
@@ -1168,8 +1168,8 @@ func TestSaveFailureRecordedAndRecovers(t *testing.T) {
 	p2.Add(&auth.Auth{UID: "u1"})
 	p2.SetCredits("u1", 42, 0)
 	p2.Flush()
-	if p2.persistFails != 0 {
-		t.Fatalf("successful save should reset persistFails, got %d", p2.persistFails)
+	if p2.persistFails.Load() != 0 {
+		t.Fatalf("successful save should reset persistFails, got %d", p2.persistFails.Load())
 	}
 	if raw, err := os.ReadFile(good); err != nil || !strings.Contains(string(raw), `"credits": 42`) {
 		t.Fatalf("state.json not written on success: %v %s", err, raw)

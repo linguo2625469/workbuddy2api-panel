@@ -34,4 +34,3 @@ func TestSchoolChatTimesEvents(t *testing.T) {
 		t.Error("agentName missing")
 	}
 }
-

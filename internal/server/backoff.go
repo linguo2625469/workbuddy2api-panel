@@ -4,7 +4,6 @@
 package server
 
 import (
-	"context"
 	"math/rand/v2"
 	"time"
 )
@@ -55,21 +54,4 @@ func backoffAfter(n int) time.Duration {
 		d = rotateBackoffCap
 	}
 	return jitterDur(d)
-}
-
-// sleepCtx 可取消的等待：ctx 取消立即返回 false（客户端断连/优雅停机不必等退避
-// 睡醒），等满返回 true。d<=0 立即放行。与 scheduler.sleepCtx 同模式（该函数未
-// 导出且 scheduler 不宜被 server 反向依赖，按任务书「等价物」口径在消费侧实现）。
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
 }

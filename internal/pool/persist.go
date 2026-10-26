@@ -237,11 +237,35 @@ func (p *Pool) applySnapshotLocked(s snapshot) {
 	p.applyAccountsLocked(s.Accounts)
 	p.restoreSchedulingLocked(s.Scheduling)
 }
+
+// saveLocked 落盘当前状态。调用方须持有 p.mu。
+//
+// 分两段：锁内只取快照（stateOverviewLocked），marshal + 写盘 + Redis 镜像都在
+// 锁外完成。此前这三步全在 p.mu 下执行，一次磁盘抖动就会阻塞所有选号请求；
+// 与 internal/usage 的落盘方式（锁内快照、锁外写）保持一致。
 func (p *Pool) saveLocked() {
 	if p.stateFp == "" {
 		return
 	}
-	sf := p.stateOverviewLocked()
+	sf, ok := p.beginSave()
+	if !ok {
+		return
+	}
+	p.mu.Unlock()
+	p.writeStateFile(sf)
+	p.mu.Lock()
+}
+
+// beginSave 取落盘快照。调用方须持有 p.mu；ok=false 表示无需写盘（未配置路径）。
+func (p *Pool) beginSave() (sf stateFile, ok bool) {
+	if p.stateFp == "" {
+		return stateFile{}, false
+	}
+	return p.stateOverviewLocked(), true
+}
+
+// writeStateFile 把状态快照写成本地 state.json 并镜像到 Redis。
+func (p *Pool) writeStateFile(sf stateFile) {
 	raw, err := json.MarshalIndent(sf, "", "  ")
 	if err != nil {
 		p.notePersistFail(err)
@@ -259,10 +283,9 @@ func (p *Pool) saveLocked() {
 		p.notePersistFail(err)
 		return
 	}
-	if p.persistFails > 0 {
+	if fails := p.persistFails.Swap(0); fails > 0 {
 		// 从连续失败中恢复：打一条恢复日志，避免"错误打完却无人知道已恢复"。
-		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", p.persistFails)
-		p.persistFails = 0
+		log.Printf("pool: state.json 落盘恢复（此前连续失败 %d 次）", fails)
 	}
 	// 同步镜像一份快照到 Redis（fire-and-forget），与本地 state.json 并存作恢复备份。
 	if p.store != nil {
@@ -279,12 +302,13 @@ func (p *Pool) saveLocked() {
 // 恢复成功的日志由 saveLocked 在成功路径统一打。与 redisstore 三处异步写的
 // "失败仅打日志、不向上抛"范式对齐，但落盘失败对运维是盲区，故多一层节流（notification）。
 func (p *Pool) notePersistFail(err error) {
-	if p.persistFails == 0 {
+	// 先取后增：n 是本次失败前的连续失败数（0 表示首败）。
+	n := p.persistFails.Add(1) - 1
+	if n == 0 {
 		log.Printf("pool: state.json 落盘失败: %v", err)
-	} else if p.persistFails%persistLogEvery == 0 {
-		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", p.persistFails, err)
+	} else if n%persistLogEvery == 0 {
+		log.Printf("pool: state.json 连续落盘失败 %d 次: %v", n, err)
 	}
-	p.persistFails++
 }
 
 // stateOverviewLocked 收集当前内存状态为 stateFile（供落盘 + 快照镜像复用）。调用方必须已持 p.mu。

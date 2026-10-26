@@ -674,7 +674,6 @@ func TestPausedVsDisabledTaskParticipation(t *testing.T) {
 	}
 }
 
-
 // TestPausedStillTravels 暂停号照常跑旅行：旅行是纯 RPC（状态/派出/领奖 +
 // 领养前置上报），不发模型对话，与「让位防风控」不冲突——唯一被跳过的
 // 对话类任务只有夜猫子（RunNightChats 真实 ChatStream）。
