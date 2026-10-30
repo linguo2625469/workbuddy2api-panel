@@ -161,6 +161,22 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
 
+## 🔗 相关：多平台合集面板
+
+如果你手上不只有 WorkBuddy / CodeBuddy 一个平台的账号，可以看看这个**同源分支**：
+
+**[WorkBuddy2API Panel](https://github.com/xu20060420fan-cell/workbuddy2api-trae-qoder-minimax-panel)**
+
+在同一块面板里统管 **WorkBuddy / CodeBuddy / Trae / Qoder / MiniMax / 豆包 Doubao / 华为云 CodeArts 码道**：
+
+- 全部账号收进一个号池，统一 OpenAI 兼容网关（`/v1/chat/completions`、`/v1/responses`）；
+- 账号池轮转、一键切号、断路冷却、会话粘性；
+- **全平台每日签到与保活**，CodeArts 还能看积分总览（每天能领多少 / 一共还剩多少 / 将过期）。
+
+本仓库专注 WorkBuddy 主力场景；那个合集更适合账号种类多、想一块面板统管的人。
+
+---
+
 ## 🆚 与上游的差异
 
 本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
