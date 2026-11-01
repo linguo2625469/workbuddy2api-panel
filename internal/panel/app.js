@@ -1176,11 +1176,26 @@ function put(obj, path, val) {
   o[path[path.length - 1]] = val;
 }
 
+function renderResinConfig(cfg) {
+  // Some frontend unit tests intentionally provide only the form controls.
+  // The status card is optional in that reduced DOM, but always present in UI.
+  if (!$('resinState')) return;
+  const resin = cfg && cfg.resin || {};
+  const enabled = !!resin.enabled;
+  const state = $('resinState');
+  state.textContent = enabled ? '已启用' : '未启用';
+  state.className = 'tag ' + (enabled ? 'ok' : 'mute');
+  $('resinPlatform').textContent = enabled ? (resin.platform || '未设置') : '—';
+  $('resinIdentity').textContent = enabled ? 'WorkBuddy UID（一账号一租约）' : '—';
+  $('resinScope').textContent = enabled ? '聊天、刷新、签到、余额、任务' : '—';
+}
+
 async function loadConfig() {
   try {
     const d = await api('config');
     cfgLoaded = d.config;
     $('cfgPath').textContent = d.path || '';
+    renderResinConfig(cfgLoaded);
     const f = $('cfgForm');
     for (const [name, path] of Object.entries(CFG_MAP)) {
       const el = f.elements[name];

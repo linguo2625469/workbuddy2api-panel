@@ -6,10 +6,30 @@
 package panel
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 )
+
+// configView 转为面板可展示的 JSON，并剥离 Resin 代理 URL 中的访问令牌。
+// 面板只需要知道是否启用以及所用平台；连接详情保持在服务器配置文件中。
+func configView(cfg any) (map[string]any, error) {
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var view map[string]any
+	if err := json.Unmarshal(raw, &view); err != nil {
+		return nil, err
+	}
+	if resin, ok := view["resin"].(map[string]any); ok {
+		url, _ := resin["url"].(string)
+		resin["enabled"] = url != ""
+		delete(resin, "url")
+	}
+	return view, nil
+}
 
 // getConfig 返回当前配置文件内容与路径（前端按 schema 渲染表单）。
 func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
@@ -22,10 +42,15 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "load config: "+err.Error())
 		return
 	}
+	view, err := configView(cfg)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "encode config view: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"path":   p.cfg.ConfigPath,
-		"config": cfg,
+		"config": view,
 	})
 }
 
