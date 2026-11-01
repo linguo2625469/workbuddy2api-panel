@@ -151,6 +151,12 @@ func main() {
 	}
 	// 聊天 SSE 流中空闲上限（S3 空闲监控读取）。
 	up.IdleTimeout = time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second
+	if err := up.ConfigureResin(cfg.Resin.URL, cfg.Resin.Platform); err != nil {
+		log.Fatalf("configure resin: %v", err)
+	}
+	if cfg.Resin.URL != "" {
+		log.Printf("[resin] account-sticky upstream proxy enabled (platform=%s)", cfg.Resin.Platform)
+	}
 	up.SanitizeFingerprints.Store(cfg.Features.SanitizeBlacklistFingerprints)
 	// 出站 UA 与归属头（issue #42 + 上游同步）：
 	// UserAgent 非空则完全覆盖；ClientVersion/CliVersion 缺省对齐官方形态；

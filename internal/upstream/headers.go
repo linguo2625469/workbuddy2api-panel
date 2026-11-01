@@ -141,6 +141,11 @@ func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
 	}
 	req.Header.Set("X-Machine-ID", deriveAccountStableID(a.UID, "machine"))
 	req.Header.Set("X-Session-ID", deriveAccountStableID(a.UID, "session"))
+	// Resin uses this stable business identity to bind exactly one egress lease
+	// per WorkBuddy account. It is consumed by the local Resin reverse proxy.
+	if c.resinEnabled() {
+		req.Header.Set("X-Resin-Account", a.UID)
+	}
 }
 
 // CommonHeaders 设置所有 API 共享的请求头。
@@ -394,6 +399,8 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	// Billing requests do not use CommonHeaders, so add the Resin identity here.
+	c.injectAccountStableHeaders(req, a)
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
