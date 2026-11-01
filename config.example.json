@@ -57,6 +57,11 @@
     "device_token_file": "",
     "passthrough_ip": false
   },
+  "resin": {
+    "_comment": "可选：账号级粘性 Resin 反向代理。url 含 Resin token，建议通过 WB2A_RESIN_URL 环境变量注入。每个 WorkBuddy UID 固定绑定一个出口。",
+    "url": "",
+    "platform": "workbuddy2api"
+  },
   "features": {
     "sanitize_blacklist_fingerprints": true
   },

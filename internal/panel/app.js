@@ -1155,6 +1155,7 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  resin_enabled: ['resin', 'enabled'], resin_platform: ['resin', 'platform'], resin_url: ['resin', 'url'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1176,11 +1177,33 @@ function put(obj, path, val) {
   o[path[path.length - 1]] = val;
 }
 
+function renderResinConfig(cfg) {
+  // Some frontend unit tests intentionally provide only the form controls.
+  // The status card is optional in that reduced DOM, but always present in UI.
+  if (!$('resinState')) return;
+  const resin = cfg && cfg.resin || {};
+  const enabled = !!resin.enabled;
+  const state = $('resinState');
+  state.textContent = enabled ? '已启用' : '未启用';
+  state.className = 'tag ' + (enabled ? 'ok' : 'mute');
+  $('resinEnabled').checked = enabled;
+  $('resinPlatform').value = resin.platform || '';
+  // The API deliberately never returns the URL/token. Do not infer it from
+  // the enabled state; an empty password field means "keep current value".
+  $('resinURL').value = '';
+  $('resinURLHint').textContent = enabled
+    ? '已配置地址；留空保留当前地址，填写则替换（不会回显）'
+    : '地址含访问令牌，仅写入服务器，不会回显';
+  $('resinIdentity').textContent = enabled ? 'WorkBuddy UID（一账号一租约）' : '—';
+  $('resinScope').textContent = enabled ? '聊天、刷新、签到、余额、任务' : '—';
+}
+
 async function loadConfig() {
   try {
     const d = await api('config');
     cfgLoaded = d.config;
     $('cfgPath').textContent = d.path || '';
+    renderResinConfig(cfgLoaded);
     const f = $('cfgForm');
     for (const [name, path] of Object.entries(CFG_MAP)) {
       const el = f.elements[name];
@@ -1211,6 +1234,17 @@ function collectConfig() {
       else v = raw;
     }
     if (v !== undefined) put(out, path, v);
+  }
+  const resinEnabled = $('resinEnabled');
+  if (resinEnabled) {
+    const enabled = resinEnabled.checked;
+    const platform = $('resinPlatform').value.trim();
+    const url = $('resinURL').value.trim();
+    put(out, ['resin', 'enabled'], enabled);
+    if (platform) put(out, ['resin', 'platform'], platform);
+    // An empty URL intentionally means keep the server-side secret. Disabling
+    // explicitly clears it on the server so a later restart cannot re-enable.
+    if (url) put(out, ['resin', 'url'], url);
   }
   return out;
 }
@@ -1256,6 +1290,11 @@ $('cfgForm').onsubmit = async ev => {
     const el = $('cfgForm').elements[firstBad];
     el.focus();
     toast('「' + (el.closest('.fld')?.querySelector('.lb')?.textContent || firstBad) + '」' + DURATION_TIP, 'err');
+    return;
+  }
+  if ($('resinEnabled') && $('resinEnabled').checked && !$('resinPlatform').value.trim()) {
+    $('resinPlatform').focus();
+    toast('启用 Resin 时必须填写代理分区', 'err');
     return;
   }
   const btn = $('btnCfgSave');

@@ -169,6 +169,13 @@ type Config struct {
 		PassthroughIP bool `json:"passthrough_ip"`
 	} `json:"upstream"`
 
+	// Resin 为 WorkBuddy 上游请求提供账号级粘性出口。URL 是 Resin 反向代理的
+	// 基址（含访问 token），例如 http://resin:2260/<token>；空则完全关闭。
+	Resin struct {
+		URL      string `json:"url"`
+		Platform string `json:"platform"`
+	} `json:"resin"`
+
 	Features struct {
 		// SanitizeBlacklistFingerprints 出站请求体黑名单指纹脱敏（默认 true；false 完全还原）。
 		SanitizeBlacklistFingerprints bool `json:"sanitize_blacklist_fingerprints"`
@@ -468,6 +475,12 @@ func applyEnv(c *Config) {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
 		}
+	}
+	if v := os.Getenv("WB2A_RESIN_URL"); v != "" {
+		c.Resin.URL = v
+	}
+	if v := os.Getenv("WB2A_RESIN_PLATFORM"); v != "" {
+		c.Resin.Platform = v
 	}
 	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
