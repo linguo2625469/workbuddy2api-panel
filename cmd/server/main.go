@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -478,6 +479,9 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
+	if err := applyResinPanelIntent(cur, incoming); err != nil {
+		return nil, err
+	}
 	merged := mergeConfigMaps(cur, incoming)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
@@ -559,6 +563,42 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	return restartRequiredFields(newCfg), nil
 }
 
+// applyResinPanelIntent interprets the panel-only enabled flag without ever
+// sending the stored Resin URL/token back to a browser. An empty URL on an
+// enabled update preserves the existing secret; disabling explicitly clears it.
+func applyResinPanelIntent(current, incoming map[string]any) error {
+	raw, ok := incoming["resin"]
+	if !ok {
+		return nil
+	}
+	resin, ok := raw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("resin must be an object")
+	}
+	enabledRaw, hasEnabled := resin["enabled"]
+	delete(resin, "enabled")
+	if !hasEnabled {
+		return nil
+	}
+	enabled, ok := enabledRaw.(bool)
+	if !ok {
+		return fmt.Errorf("resin.enabled must be boolean")
+	}
+	if !enabled {
+		resin["url"] = ""
+		return nil
+	}
+	if url, _ := resin["url"].(string); strings.TrimSpace(url) != "" {
+		return nil
+	}
+	currentResin, _ := current["resin"].(map[string]any)
+	currentURL, _ := currentResin["url"].(string)
+	if strings.TrimSpace(currentURL) == "" {
+		return fmt.Errorf("启用 Resin 时请填写 Resin 反向代理地址")
+	}
+	return nil
+}
+
 // applyCNChatBase 把 config cn.chat_base 装配进上游 client；空则保留内置默认，
 // 老配置（无 cn 段）行为不变。
 func applyCNChatBase(up *upstream.Client, cfg *Config) {
@@ -586,6 +626,7 @@ func restartRequiredFields(c *Config) []string {
 	// 之后不再读取——不在 livecfg 热快照里，也无法热改。此前漏列，导致面板改完
 	// 显示"已保存"却不提示需要重启，用户以为没生效（issue #102 附带发现 2）。
 	out = append(out, "upstream.user_agent")
+	out = append(out, "resin.url", "resin.platform")
 	// cn.chat_base 同样只在装配期写进 up.ChatBaseCN（请求路径并发读取，不做热改）。
 	out = append(out, "cn.chat_base")
 	if c.Upstash.URL != "" || c.Upstash.Token != "" {

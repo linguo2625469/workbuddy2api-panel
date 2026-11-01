@@ -1144,11 +1144,23 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <header><h3>Resin 账号代理</h3><span class="grow"></span><span class="tag mute" id="resinState">加载中</span></header>
           <div class="pad">
             <div class="grid3">
-              <div class="fld"><span class="lb">代理分区</span><div class="cfg-value"><code id="resinPlatform">—</code></div></div>
+              <div>
+                <div class="switch"><span class="lb">启用 Resin 账号代理</span>
+                  <input type="checkbox" name="resin_enabled" id="resinEnabled"></div>
+                <div class="hint">保存后需重启网关生效</div>
+              </div>
+              <label class="fld"><span class="lb">代理分区</span>
+                <input name="resin_platform" id="resinPlatform" placeholder="workbuddy2api">
+                <span class="hint">Resin 中已创建的平台名称</span></label>
+              <label class="fld"><span class="lb">Resin 反向代理地址</span>
+                <input name="resin_url" id="resinURL" type="password" autocomplete="new-password" placeholder="留空保留当前地址">
+                <span class="hint" id="resinURLHint">地址含访问令牌，仅写入服务器，不会回显</span></label>
+            </div>
+            <div class="grid2" style="margin-top:4px">
               <div class="fld"><span class="lb">粘性身份</span><div class="cfg-value" id="resinIdentity">—</div></div>
               <div class="fld"><span class="lb">覆盖请求</span><div class="cfg-value" id="resinScope">—</div></div>
             </div>
-            <div class="hint">启用后，网关按 WorkBuddy UID 把每个账号固定到 Resin 的独立出口租约。代理地址和访问令牌不会显示在面板中；分区节点与租约详情请在 Resin 控制台查看。</div>
+            <div class="hint">启用后，网关按 WorkBuddy UID 把每个账号固定到 Resin 的独立出口租约。分区节点与租约详情请在 Resin 控制台查看。</div>
           </div>
         </div>
 
