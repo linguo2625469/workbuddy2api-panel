@@ -12,7 +12,18 @@ WorkBuddy2API 网关的 **macOS 菜单栏启动器**：常驻系统栏，一键�
 
 ### 1. 安装启动器
 
-从 [Releases](https://github.com/hardwin2023/workbuddy2api-panel/releases) 下载 `WorkBuddy2API-<版本>-universal.dmg`：
+从 [Releases](https://github.com/hardwin2023/workbuddy2api-panel/releases) 下载 **`WorkBuddy2API-<版本>-full.zip`**（推荐：App 安装包 + 双架构 `wb2api` + 使用说明，一次下完），解压后得到：
+
+```
+WorkBuddy2API-<版本>/
+├── WorkBuddy2API-<版本>-universal.dmg    ← 双击安装
+├── gateway/
+│   ├── apple-silicon/wb2api              ← M1~M4 芯片
+│   └── intel/wb2api                      ← Intel 芯片
+└── 使用说明.txt
+```
+
+只想单独要 App 的话，下载 `WorkBuddy2API-<版本>-universal.dmg` 即可。
 
 1. 双击 DMG，把 `WorkBuddy2API.app` 拖进「应用程序」；
 2. 首次打开：双击 App，弹出「Apple 无法验证」时点「完成」→ 打开**系统设置 → 隐私与安全性** → 在「安全性」区域点「**仍要打开**」→ 输入开机密码。之后双击即可。
@@ -30,9 +41,13 @@ xattr -dr com.apple.quarantine /Applications/WorkBuddy2API.app
 
 ### 2. 准备网关目录
 
-启动器默认在 `~/workbuddy2api` 找 `wb2api`。准备方式二选一：
+启动器默认在 `~/workbuddy2api` 找 `wb2api`。准备方式三选一：
 
-**方式 A：下载官方二进制（推荐）**
+**方式 A：用 full.zip 里的网关（推荐）**
+
+`full.zip` 已按芯片分好目录，直接把 `gateway/apple-silicon`（M1~M4）或 `gateway/intel` 整个文件夹作为网关目录即可，里面已经有 `wb2api`。
+
+**方式 B：下载官方二进制**
 
 1. 打开 [上游 Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest)，下载 `wb2api-panel-<版本>-darwin-arm64.tar.gz`（Intel 机器选 `darwin-amd64`）；
 2. 解压后把 `wb2api` 放到 `~/workbuddy2api/`；
@@ -44,7 +59,7 @@ tar -xzf ~/Downloads/wb2api-panel-*-darwin-arm64.tar.gz -C ~/workbuddy2api wb2ap
 cp config.example.json ~/workbuddy2api/config.json   # 在仓库目录下执行
 ```
 
-**方式 B：已经有网关目录**
+**方式 C：已经有网关目录**
 
 首次启动时点提示条上的「**选择网关目录…**」，指向包含 `wb2api` 与 `config.json` 的目录即可；之后也可点工具栏的文件夹图标随时更改。
 
