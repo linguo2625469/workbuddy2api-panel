@@ -59,11 +59,34 @@ jobs:
 
             ## 打开之后
 
-            - 屏幕右上角菜单栏会出现一个小图标，**这就是它**。关掉主窗口服务不会停，图标还在 = 服务在跑
-            - 点图标可以：启动 / 停止服务、打开管理面板、复制 API 配置
+            屏幕右上角菜单栏会出现一个小图标，**这就是它**。点开是这样：
+
+            ![菜单栏菜单](https://raw.githubusercontent.com/${{ github.repository }}/main/macapp/docs/images/01-menubar.png)
+
+            - 关掉主窗口服务不会停，**图标还在 = 服务在跑**
+            - 点图标可以：打开管理面板、停止 / 启动服务、检查更新、显示主窗口
             - 图标**变红闪烁** = 账号池里没有可用账号（冷却中 / 已禁用），打开管理面板看一下
-            - 想开机自动启动：勾选「自启动」
             - 想彻底退出：点图标 →「退出」
+
+            ## 主窗口
+
+            ![主窗口](https://raw.githubusercontent.com/${{ github.repository }}/main/macapp/docs/images/03-main-window.png)
+
+            - **管理面板**：打开网页版管理界面，配置账号池
+            - **自启动**：勾上，开机后自动把服务拉起来
+            - **断流保持**：弱网、掉线、抖动时保持连接并自动续接
+            - **检查更新**：对比上游最新版本
+            - **清空日志**：日志会自动定时清理，也可以手动清
+
+            ## 接进 AI IDE
+
+            点「**API 配置**」，把三个值复制到 IDE 里新增的「OpenAI 兼容」模型即可：
+
+            ![API 配置](https://raw.githubusercontent.com/${{ github.repository }}/main/macapp/docs/images/02-api-config.png)
+
+            - **Base URL**：`http://127.0.0.1:18888/v1`
+            - **Model**：下拉里标着「速率 0」的是免费模型，可直接选
+            - **API Key**：点右侧图标复制
 
             ## 还需要什么
 
