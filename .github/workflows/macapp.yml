@@ -39,25 +39,35 @@ jobs:
             macapp/dist/*.dmg
             macapp/dist/SHA256SUMS.txt
           body: |
-            macOS 菜单栏启动器（通用二进制，Apple Silicon + Intel，需 **macOS 15.0+**）。
+            ## 怎么用（3 步）
 
-            **启动器不含网关逻辑**，只负责拉起同目录的 `wb2api`，请先准备网关二进制。
+            **1. 下载并安装**
 
-            ### 首次打开需要放行一次
+            下载下面的 `WorkBuddy2API-1.0.0-universal.dmg`，双击打开，把 `WorkBuddy2API.app` 拖进「应用程序」文件夹。
 
-            本包为 ad-hoc 签名，未做 Apple 公证：
+            **2. 第一次打开时允许一次**
 
-            1. 双击 App → 提示「Apple 无法验证」→ 点「完成」
-            2. 打开 **系统设置 → 隐私与安全性** → 在「安全性」区域点「**仍要打开**」→ 输入开机密码
-            3. 之后双击即可
+            双击 App 会提示「Apple 无法验证」，这是正常的（个人开发者没有购买苹果的签名证书）。
 
-            > macOS 15（Sequoia）起已移除「右键 → 打开」的绕过入口。
-            > 命令行等效方式：`xattr -dr com.apple.quarantine /Applications/WorkBuddy2API.app`
+            - 点「完成」
+            - 打开 **系统设置 → 隐私与安全性**，向下找到「安全性」，点「**仍要打开**」，输入开机密码
+            - 再双击 App 就能打开，以后不会再问
 
-            ### 准备网关
+            **3. 选择网关目录**
 
-            从[上游 Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64` / `darwin-amd64` 二进制，解压出 `wb2api` 放到 `~/workbuddy2api/`；或用首次启动时的「选择网关目录…」指定已有目录。
+            App 本身是「遥控器」，真正的服务是 `wb2api`。如果打开后提示找不到 `wb2api`，点橙色提示条上的「**选择网关目录…**」，选中放有 `wb2api` 的文件夹即可（只需一次）。
 
-            校验：`shasum -a 256 -c SHA256SUMS.txt`
+            ## 打开之后
 
-            详细文档见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。
+            - 屏幕右上角菜单栏会出现一个小图标，**这就是它**。关掉主窗口服务不会停，图标还在 = 服务在跑
+            - 点图标可以：启动 / 停止服务、打开管理面板、复制 API 配置
+            - 图标**变红闪烁** = 账号池里没有可用账号（冷却中 / 已禁用），打开管理面板看一下
+            - 想开机自动启动：勾选「自启动」
+            - 想彻底退出：点图标 →「退出」
+
+            ## 还需要什么
+
+            - macOS **15.0 或更高**（Apple 芯片、Intel 都支持）
+            - 网关程序 `wb2api`：到[上游 Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64`（M 系列芯片）或 `darwin-amd64`（Intel），解压出 `wb2api` 放到任意文件夹，再用第 3 步选中该文件夹
+
+            更多说明见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。
