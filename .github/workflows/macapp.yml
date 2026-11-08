@@ -43,8 +43,26 @@ jobs:
             cp "/tmp/gw-$ARCH/wb2api" "$ROOT/gateway/$DIR/wb2api"
             chmod 755 "$ROOT/gateway/$DIR/wb2api"
           done
-          cd macapp/dist/bundle
-          zip -r -q -X "../WorkBuddy2API-$VERSION-full.zip" "WorkBuddy2API-$VERSION"
+          cd macapp/dist
+          python3 - "WorkBuddy2API-$VERSION-full.zip" "bundle/WorkBuddy2API-$VERSION" <<'PY'
+          import os, sys, zipfile
+          out, src = sys.argv[1], sys.argv[2]
+          root = os.path.dirname(src)
+          with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for dirpath, dirnames, filenames in os.walk(src):
+                  dirnames.sort()
+                  rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+                  zi = zipfile.ZipInfo(rel_dir + "/")
+                  zi.external_attr = (0o40755 << 16) | 0x10
+                  z.writestr(zi, b"")
+                  for fn in sorted(filenames):
+                      full = os.path.join(dirpath, fn)
+                      rel = os.path.relpath(full, root).replace(os.sep, "/")
+                      zi = zipfile.ZipInfo(rel)
+                      zi.external_attr = (os.stat(full).st_mode & 0o777) << 16
+                      zi.compress_type = zipfile.ZIP_DEFLATED
+                      z.writestr(zi, open(full, "rb").read())
+          PY
 
       - name: Checksums
         run: cd macapp/dist && shasum -a 256 *.dmg *.zip > SHA256SUMS.txt
