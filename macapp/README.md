@@ -8,6 +8,20 @@ WorkBuddy2API 网关的 **macOS 菜单栏启动器**：常驻系统栏，一键�
 - Apple 芯片（arm64）或 Intel（x86_64），发布包为通用二进制
 - 已下载网关本体 `wb2api`（见下节）
 
+## 界面
+
+菜单栏下拉（点图标打开）：
+
+<img src="docs/images/01-menubar.png" width="300" alt="菜单栏菜单">
+
+主窗口：
+
+<img src="docs/images/03-main-window.png" width="640" alt="主窗口">
+
+API 配置弹窗（Base URL / 模型 / API Key 一键复制）：
+
+<img src="docs/images/02-api-config.png" width="640" alt="API 配置">
+
 ## 安装
 
 ### 1. 安装启动器
