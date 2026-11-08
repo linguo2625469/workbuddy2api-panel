@@ -22,14 +22,40 @@ jobs:
           else
             VERSION="0.0.0-dev"
           fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           APP_VERSION="$VERSION" bash macapp/build.sh --dmg
-          cd macapp/dist && shasum -a 256 *.dmg > SHA256SUMS.txt
+
+      - name: Bundle full zip (App + wb2api)
+        run: |
+          set -e
+          ROOT="macapp/dist/bundle/WorkBuddy2API-$VERSION"
+          mkdir -p "$ROOT/gateway/apple-silicon" "$ROOT/gateway/intel"
+          cp macapp/dist/*.dmg "$ROOT/"
+          cp LICENSE NOTICE "macapp/docs/使用说明.txt" "$ROOT/"
+          for PAIR in arm64:apple-silicon amd64:intel; do
+            ARCH="${PAIR%%:*}"
+            DIR="${PAIR##*:}"
+            URL=$(curl -s https://api.github.com/repos/linguo2625469/workbuddy2api-panel/releases/latest \
+              | python3 -c "import sys,json;d=json.load(sys.stdin);print([a['browser_download_url'] for a in d['assets'] if a['name'].endswith('darwin-$ARCH.tar.gz')][0])")
+            curl -sL "$URL" -o "/tmp/gw-$ARCH.tar.gz"
+            mkdir -p "/tmp/gw-$ARCH"
+            tar -xzf "/tmp/gw-$ARCH.tar.gz" -C "/tmp/gw-$ARCH"
+            cp "/tmp/gw-$ARCH/wb2api" "$ROOT/gateway/$DIR/wb2api"
+            chmod 755 "$ROOT/gateway/$DIR/wb2api"
+          done
+          cd macapp/dist/bundle
+          zip -r -q -X "../WorkBuddy2API-$VERSION-full.zip" "WorkBuddy2API-$VERSION"
+
+      - name: Checksums
+        run: cd macapp/dist && shasum -a 256 *.dmg *.zip > SHA256SUMS.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: WorkBuddy2API-dmg
-          path: macapp/dist/
+          path: |
+            macapp/dist/*.dmg
+            macapp/dist/*.zip
 
       - name: Publish release
         if: github.ref_type == 'tag'
@@ -37,13 +63,32 @@ jobs:
         with:
           files: |
             macapp/dist/*.dmg
+            macapp/dist/*.zip
             macapp/dist/SHA256SUMS.txt
           body: |
+            ## 下载哪个？
+
+            | 文件 | 适合谁 |
+            | --- | --- |
+            | **`WorkBuddy2API-1.0.0-full.zip`** | **推荐**。App 安装包 + 网关程序 wb2api 都在里面，一次下完不用再找 |
+            | `WorkBuddy2API-1.0.0-universal.dmg` | 只想要 App，网关自己另行准备 |
+
+            下载 full.zip 解压后是这样：
+
+            ```
+            WorkBuddy2API-1.0.0/
+            ├── WorkBuddy2API-1.0.0-universal.dmg    ← 双击安装
+            ├── gateway/
+            │   ├── apple-silicon/wb2api             ← M1~M4 芯片选这个文件夹
+            │   └── intel/wb2api                     ← Intel 芯片选这个文件夹
+            └── 使用说明.txt
+            ```
+
             ## 怎么用（3 步）
 
-            **1. 下载并安装**
+            **1. 装 App**
 
-            下载下面的 `WorkBuddy2API-1.0.0-universal.dmg`，双击打开，把 `WorkBuddy2API.app` 拖进「应用程序」文件夹。
+            双击 `WorkBuddy2API-1.0.0-universal.dmg`，把 `WorkBuddy2API.app` 拖进「应用程序」文件夹。
 
             **2. 第一次打开时允许一次**
 
@@ -53,9 +98,14 @@ jobs:
             - 打开 **系统设置 → 隐私与安全性**，向下找到「安全性」，点「**仍要打开**」，输入开机密码
             - 再双击 App 就能打开，以后不会再问
 
-            **3. 选择网关目录**
+            **3. 选择网关目录（只需一次）**
 
-            App 本身是「遥控器」，真正的服务是 `wb2api`。如果打开后提示找不到 `wb2api`，点橙色提示条上的「**选择网关目录…**」，选中放有 `wb2api` 的文件夹即可（只需一次）。
+            App 本身是「遥控器」，真正干活的是 `wb2api`。
+
+            - Apple 芯片（M1~M4）→ 选 `gateway/apple-silicon`
+            - Intel 芯片 → 选 `gateway/intel`
+
+            不确定的话：左上角  → 关于本机 → 看「芯片」一栏。App 打开后点橙色提示条上的「**选择网关目录…**」，选上面那个文件夹即可。
 
             ## 打开之后
 
@@ -91,6 +141,6 @@ jobs:
             ## 还需要什么
 
             - macOS **15.0 或更高**（Apple 芯片、Intel 都支持）
-            - 网关程序 `wb2api`：到[上游 Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64`（M 系列芯片）或 `darwin-amd64`（Intel），解压出 `wb2api` 放到任意文件夹，再用第 3 步选中该文件夹
+            - `full.zip` 里已经带了 `wb2api`；如果你只下了 dmg，就去[上游 Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64`（M 系列芯片）或 `darwin-amd64`（Intel），解压出 `wb2api` 放到一个文件夹里，再用第 3 步选中它
 
             更多说明见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。
