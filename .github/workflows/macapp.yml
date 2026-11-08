@@ -23,7 +23,7 @@ jobs:
             VERSION="0.0.0-dev"
           fi
           APP_VERSION="$VERSION" bash macapp/build.sh --dmg
-          shasum -a 256 macapp/dist/*.dmg > macapp/dist/SHA256SUMS.txt
+          cd macapp/dist && shasum -a 256 *.dmg > SHA256SUMS.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -39,7 +39,25 @@ jobs:
             macapp/dist/*.dmg
             macapp/dist/SHA256SUMS.txt
           body: |
-            macOS 菜单栏启动器（通用二进制，需 macOS 15+）。
+            macOS 菜单栏启动器（通用二进制，Apple Silicon + Intel，需 **macOS 15.0+**）。
 
-            首次打开：在「应用程序」里右键 App → 打开。
-            详见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。
+            **启动器不含网关逻辑**，只负责拉起同目录的 `wb2api`，请先准备网关二进制。
+
+            ### 首次打开需要放行一次
+
+            本包为 ad-hoc 签名，未做 Apple 公证：
+
+            1. 双击 App → 提示「Apple 无法验证」→ 点「完成」
+            2. 打开 **系统设置 → 隐私与安全性** → 在「安全性」区域点「**仍要打开**」→ 输入开机密码
+            3. 之后双击即可
+
+            > macOS 15（Sequoia）起已移除「右键 → 打开」的绕过入口。
+            > 命令行等效方式：`xattr -dr com.apple.quarantine /Applications/WorkBuddy2API.app`
+
+            ### 准备网关
+
+            从[上游 Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64` / `darwin-amd64` 二进制，解压出 `wb2api` 放到 `~/workbuddy2api/`；或用首次启动时的「选择网关目录…」指定已有目录。
+
+            校验：`shasum -a 256 -c SHA256SUMS.txt`
+
+            详细文档见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。
