@@ -288,7 +288,19 @@ docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
 
-### 方式二：Windows 单文件运行（无需 Docker）
+### 方式二：macOS 菜单栏 App（图形界面，一键启停）
+
+`macapp/` 提供一个 macOS 15+ 的菜单栏启动器：一键启停网关、账号池异常时菜单栏图标变红闪烁、API 配置一键复制、断流保持、跟随上游一键更新。启动器不含网关逻辑，只负责拉起同目录的 `wb2api`。
+
+```bash
+# 1) 从 Releases 下载 WorkBuddy2API-<版本>-universal.dmg，拖入「应用程序」
+# 2) 首次打开：系统设置 → 隐私与安全性 → 「仍要打开」（未做 Apple 公证，见 macapp/README.md）
+# 3) 首次启动未找到 wb2api 时，主窗口提示条可「选择网关目录…」或跳转 Release 下载
+```
+
+网关二进制建议跟随上游 [linguo2625469/workbuddy2api-panel Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest)（`darwin-arm64` / `darwin-amd64`）。完整安装、构建与排错见 [macapp/README.md](macapp/README.md)。
+
+### 方式三：Windows 单文件运行（无需 Docker）
 
 ```powershell
 # 1) 下载 Release 中的 wb2api.exe，或从源码构建
@@ -303,7 +315,7 @@ go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
 
 exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
 
-### 方式三：源码运行（开发调试）
+### 方式四：源码运行（开发调试）
 
 ```bash
 go build ./...

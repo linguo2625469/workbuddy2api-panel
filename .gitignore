@@ -45,3 +45,8 @@ docs/
 *.zip
 server.exe
 .DS_Store
+
+# macOS 启动器（macapp）：构建产物不入库
+macapp/WorkBuddy2API.app/
+macapp/dist/
+!macapp/README.md

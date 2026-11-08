@@ -1,0 +1,45 @@
+name: macapp
+
+on:
+  push:
+    tags:
+      - 'app-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app + DMG
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#app-v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          APP_VERSION="$VERSION" bash macapp/build.sh --dmg
+          shasum -a 256 macapp/dist/*.dmg > macapp/dist/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkBuddy2API-dmg
+          path: macapp/dist/
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macapp/dist/*.dmg
+            macapp/dist/SHA256SUMS.txt
+          body: |
+            macOS 菜单栏启动器（通用二进制，需 macOS 15+）。
+
+            首次打开：在「应用程序」里右键 App → 打开。
+            详见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。

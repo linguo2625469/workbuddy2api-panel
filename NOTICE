@@ -1,0 +1,24 @@
+WorkBuddy2API Panel
+===================
+
+本仓库是以下项目的分支与扩展，按 MIT License 分发（见 LICENSE）：
+
+1. 原始项目：Sliverkiss/workbuddy2api
+   https://github.com/Sliverkiss/workbuddy2api
+   Copyright (c) 2026 Sliverkiss
+
+2. 增强分支（本仓库的上游）：linguo2625469/workbuddy2api-panel
+   https://github.com/linguo2625469/workbuddy2api-panel
+   Copyright (c) 2026 linguo2625469
+
+3. 本分支新增内容：macOS 菜单栏启动器（macapp/）
+   https://github.com/hardwin2023/workbuddy2api-panel
+   Copyright (c) 2026 hardwin2023
+
+macOS 启动器（macapp/）为独立编写，未包含上游代码；它通过启动同目录下的
+wb2api 二进制、调用本地 HTTP 接口（/healthz、/v1/models、/status）工作。
+
+再分发（源码或二进制形式）时请保留本文件与 LICENSE 中的版权声明。
+
+免责声明：本项目是非官方网关，与腾讯 CodeBuddy 无关联。使用风险（含账号
+封禁、服务条款违约）由使用者自行承担，作者与贡献者不提供任何担保。
