@@ -1,0 +1,170 @@
+name: macapp
+
+on:
+  push:
+    tags:
+      - 'app-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app + DMG
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#app-v}"
+          else
+            VERSION="0.0.0-dev"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          APP_VERSION="$VERSION" bash macapp/build.sh --dmg
+
+      - name: Bundle full zip (App + wb2api)
+        run: |
+          set -e
+          ROOT="macapp/dist/bundle/WorkBuddy2API-$VERSION"
+          mkdir -p "$ROOT/gateway/apple-silicon" "$ROOT/gateway/intel"
+          cp macapp/dist/*.dmg "$ROOT/"
+          cp LICENSE NOTICE "macapp/docs/使用说明.txt" "$ROOT/"
+          for PAIR in arm64:apple-silicon amd64:intel; do
+            ARCH="${PAIR%%:*}"
+            DIR="${PAIR##*:}"
+            URL=$(curl -s https://api.github.com/repos/misakano7545/workbuddy2api-panel/releases/latest \
+              | python3 -c "import sys,json;d=json.load(sys.stdin);print([a['browser_download_url'] for a in d['assets'] if a['name'].endswith('darwin-$ARCH.zip')][0])")
+            curl -sL "$URL" -o "/tmp/gw-$ARCH.zip"
+            rm -rf "/tmp/gw-$ARCH"
+            ditto -x -k "/tmp/gw-$ARCH.zip" "/tmp/gw-$ARCH"
+            cp "/tmp/gw-$ARCH/wb2api" "$ROOT/gateway/$DIR/wb2api"
+            chmod 755 "$ROOT/gateway/$DIR/wb2api"
+          done
+          cd macapp/dist
+          python3 - "WorkBuddy2API-$VERSION-full.zip" "bundle/WorkBuddy2API-$VERSION" <<'PY'
+          import os, sys, zipfile
+          out, src = sys.argv[1], sys.argv[2]
+          root = os.path.dirname(src)
+          with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for dirpath, dirnames, filenames in os.walk(src):
+                  dirnames.sort()
+                  rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
+                  zi = zipfile.ZipInfo(rel_dir + "/")
+                  zi.external_attr = (0o40755 << 16) | 0x10
+                  z.writestr(zi, b"")
+                  for fn in sorted(filenames):
+                      full = os.path.join(dirpath, fn)
+                      rel = os.path.relpath(full, root).replace(os.sep, "/")
+                      zi = zipfile.ZipInfo(rel)
+                      zi.external_attr = (os.stat(full).st_mode & 0o777) << 16
+                      zi.compress_type = zipfile.ZIP_DEFLATED
+                      z.writestr(zi, open(full, "rb").read())
+          PY
+
+      - name: Checksums
+        run: cd macapp/dist && shasum -a 256 *.dmg *.zip > SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorkBuddy2API-dmg
+          path: |
+            macapp/dist/*.dmg
+            macapp/dist/*.zip
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macapp/dist/*.dmg
+            macapp/dist/*.zip
+            macapp/dist/SHA256SUMS.txt
+          body: |
+            ## 这次改了什么
+
+            - **检查更新跟维护线了**：以前只认原仓库（`linguo2625469`），而原仓库 10 月就停更了，所以永远提示「已是最新」。现在跟着继续维护的 `misakano7545/workbuddy2api-panel` 走，能拿到 11 月之后那批网关修复（供应商过载不再罚号、加密 auth 自动解密等）
+            - **版本号识别修好了**：维护线用 `2026.11.10.1958` 这种四段式版本，以前认不出来
+            - **限时免费的模型也能选到了**：网关的牌价和限时优惠价分开存，以前只看牌价，会漏掉「牌价 0.30、限时 0.00」这类。现在取两者里更低的判，下拉里会标「（限时免费）」
+
+            ## 下载哪个？
+
+            | 文件 | 适合谁 |
+            | --- | --- |
+            | **`WorkBuddy2API-${{ env.VERSION }}-full.zip`** | **推荐**。App 安装包 + 网关程序 wb2api 都在里面，一次下完不用再找 |
+            | `WorkBuddy2API-${{ env.VERSION }}-universal.dmg` | 只想要 App，网关自己另行准备 |
+
+            下载 full.zip 解压后是这样：
+
+            ```
+            WorkBuddy2API-${{ env.VERSION }}/
+            ├── WorkBuddy2API-${{ env.VERSION }}-universal.dmg    ← 双击安装
+            ├── gateway/
+            │   ├── apple-silicon/wb2api             ← M1~M4 芯片选这个文件夹
+            │   └── intel/wb2api                     ← Intel 芯片选这个文件夹
+            └── 使用说明.txt
+            ```
+
+            ## 怎么用（3 步）
+
+            **1. 装 App**
+
+            双击 `WorkBuddy2API-${{ env.VERSION }}-universal.dmg`，把 `WorkBuddy2API.app` 拖进「应用程序」文件夹。
+
+            **2. 第一次打开时允许一次**
+
+            双击 App 会提示「Apple 无法验证」，这是正常的（个人开发者没有购买苹果的签名证书）。
+
+            - 点「完成」
+            - 打开 **系统设置 → 隐私与安全性**，向下找到「安全性」，点「**仍要打开**」，输入开机密码
+            - 再双击 App 就能打开，以后不会再问
+
+            **3. 选择网关目录（只需一次）**
+
+            App 本身是「遥控器」，真正干活的是 `wb2api`。
+
+            - Apple 芯片（M1~M4）→ 选 `gateway/apple-silicon`
+            - Intel 芯片 → 选 `gateway/intel`
+
+            不确定的话：左上角  → 关于本机 → 看「芯片」一栏。App 打开后点橙色提示条上的「**选择网关目录…**」，选上面那个文件夹即可。
+
+            ## 打开之后
+
+            屏幕右上角菜单栏会出现一个小图标，**这就是它**。点开是这样：
+
+            ![菜单栏菜单](https://raw.githubusercontent.com/${{ github.repository }}/main/macapp/docs/images/01-menubar.png)
+
+            - 关掉主窗口服务不会停，**图标还在 = 服务在跑**
+            - 点图标可以：打开管理面板、停止 / 启动服务、检查更新、显示主窗口
+            - 图标**变红闪烁** = 账号池里没有可用账号（冷却中 / 已禁用），打开管理面板看一下
+            - 想彻底退出：点图标 →「退出」
+
+            ## 主窗口
+
+            ![主窗口](https://raw.githubusercontent.com/${{ github.repository }}/main/macapp/docs/images/03-main-window.png)
+
+            - **管理面板**：打开网页版管理界面，配置账号池
+            - **自启动**：勾上，开机后自动把服务拉起来
+            - **断流保持**：弱网、掉线、抖动时保持连接并自动续接
+            - **检查更新**：对比维护线最新版本，一键换掉 `wb2api`（只动程序，不动你的配置和账号）
+            - **清空日志**：日志会自动定时清理，也可以手动清
+
+            ## 接进 AI IDE
+
+            点「**API 配置**」，把三个值复制到 IDE 里新增的「OpenAI 兼容」模型即可：
+
+            ![API 配置](https://raw.githubusercontent.com/${{ github.repository }}/main/macapp/docs/images/02-api-config.png)
+
+            - **Base URL**：`http://127.0.0.1:18888/v1`
+            - **Model**：下拉里标着「速率 0」的是免费模型，可直接选
+            - **API Key**：点右侧图标复制
+
+            ## 还需要什么
+
+            - macOS **15.0 或更高**（Apple 芯片、Intel 都支持）
+            - `full.zip` 里已经带了 `wb2api`；如果你只下了 dmg，就去[维护线 Releases](https://github.com/misakano7545/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64.zip`（M 系列芯片）或 `darwin-amd64.zip`（Intel），解压出 `wb2api` 放到一个文件夹里，再用第 3 步选中它
+
+            更多说明见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。
