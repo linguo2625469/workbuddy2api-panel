@@ -35,11 +35,11 @@ jobs:
           for PAIR in arm64:apple-silicon amd64:intel; do
             ARCH="${PAIR%%:*}"
             DIR="${PAIR##*:}"
-            URL=$(curl -s https://api.github.com/repos/linguo2625469/workbuddy2api-panel/releases/latest \
-              | python3 -c "import sys,json;d=json.load(sys.stdin);print([a['browser_download_url'] for a in d['assets'] if a['name'].endswith('darwin-$ARCH.tar.gz')][0])")
-            curl -sL "$URL" -o "/tmp/gw-$ARCH.tar.gz"
-            mkdir -p "/tmp/gw-$ARCH"
-            tar -xzf "/tmp/gw-$ARCH.tar.gz" -C "/tmp/gw-$ARCH"
+            URL=$(curl -s https://api.github.com/repos/misakano7545/workbuddy2api-panel/releases/latest \
+              | python3 -c "import sys,json;d=json.load(sys.stdin);print([a['browser_download_url'] for a in d['assets'] if a['name'].endswith('darwin-$ARCH.zip')][0])")
+            curl -sL "$URL" -o "/tmp/gw-$ARCH.zip"
+            rm -rf "/tmp/gw-$ARCH"
+            ditto -x -k "/tmp/gw-$ARCH.zip" "/tmp/gw-$ARCH"
             cp "/tmp/gw-$ARCH/wb2api" "$ROOT/gateway/$DIR/wb2api"
             chmod 755 "$ROOT/gateway/$DIR/wb2api"
           done
@@ -84,18 +84,24 @@ jobs:
             macapp/dist/*.zip
             macapp/dist/SHA256SUMS.txt
           body: |
+            ## 这次改了什么
+
+            - **检查更新跟维护线了**：以前只认原仓库（`linguo2625469`），而原仓库 10 月就停更了，所以永远提示「已是最新」。现在跟着继续维护的 `misakano7545/workbuddy2api-panel` 走，能拿到 11 月之后那批网关修复（供应商过载不再罚号、加密 auth 自动解密等）
+            - **版本号识别修好了**：维护线用 `2026.11.10.1958` 这种四段式版本，以前认不出来
+            - **限时免费的模型也能选到了**：网关的牌价和限时优惠价分开存，以前只看牌价，会漏掉「牌价 0.30、限时 0.00」这类。现在取两者里更低的判，下拉里会标「（限时免费）」
+
             ## 下载哪个？
 
             | 文件 | 适合谁 |
             | --- | --- |
-            | **`WorkBuddy2API-1.0.0-full.zip`** | **推荐**。App 安装包 + 网关程序 wb2api 都在里面，一次下完不用再找 |
-            | `WorkBuddy2API-1.0.0-universal.dmg` | 只想要 App，网关自己另行准备 |
+            | **`WorkBuddy2API-${{ env.VERSION }}-full.zip`** | **推荐**。App 安装包 + 网关程序 wb2api 都在里面，一次下完不用再找 |
+            | `WorkBuddy2API-${{ env.VERSION }}-universal.dmg` | 只想要 App，网关自己另行准备 |
 
             下载 full.zip 解压后是这样：
 
             ```
-            WorkBuddy2API-1.0.0/
-            ├── WorkBuddy2API-1.0.0-universal.dmg    ← 双击安装
+            WorkBuddy2API-${{ env.VERSION }}/
+            ├── WorkBuddy2API-${{ env.VERSION }}-universal.dmg    ← 双击安装
             ├── gateway/
             │   ├── apple-silicon/wb2api             ← M1~M4 芯片选这个文件夹
             │   └── intel/wb2api                     ← Intel 芯片选这个文件夹
@@ -106,7 +112,7 @@ jobs:
 
             **1. 装 App**
 
-            双击 `WorkBuddy2API-1.0.0-universal.dmg`，把 `WorkBuddy2API.app` 拖进「应用程序」文件夹。
+            双击 `WorkBuddy2API-${{ env.VERSION }}-universal.dmg`，把 `WorkBuddy2API.app` 拖进「应用程序」文件夹。
 
             **2. 第一次打开时允许一次**
 
@@ -143,7 +149,7 @@ jobs:
             - **管理面板**：打开网页版管理界面，配置账号池
             - **自启动**：勾上，开机后自动把服务拉起来
             - **断流保持**：弱网、掉线、抖动时保持连接并自动续接
-            - **检查更新**：对比上游最新版本
+            - **检查更新**：对比维护线最新版本，一键换掉 `wb2api`（只动程序，不动你的配置和账号）
             - **清空日志**：日志会自动定时清理，也可以手动清
 
             ## 接进 AI IDE
@@ -159,6 +165,6 @@ jobs:
             ## 还需要什么
 
             - macOS **15.0 或更高**（Apple 芯片、Intel 都支持）
-            - `full.zip` 里已经带了 `wb2api`；如果你只下了 dmg，就去[上游 Releases](https://github.com/linguo2625469/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64`（M 系列芯片）或 `darwin-amd64`（Intel），解压出 `wb2api` 放到一个文件夹里，再用第 3 步选中它
+            - `full.zip` 里已经带了 `wb2api`；如果你只下了 dmg，就去[维护线 Releases](https://github.com/misakano7545/workbuddy2api-panel/releases/latest) 下载 `darwin-arm64.zip`（M 系列芯片）或 `darwin-amd64.zip`（Intel），解压出 `wb2api` 放到一个文件夹里，再用第 3 步选中它
 
             更多说明见 [macapp/README.md](https://github.com/${{ github.repository }}/blob/main/macapp/README.md)。
