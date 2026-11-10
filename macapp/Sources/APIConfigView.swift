@@ -94,7 +94,8 @@ struct APIConfigView: View {
                     } else {
                         Picker("", selection: modelSelection) {
                             ForEach(catalog.freeModels) { model in
-                                Text("\(model.name) · \(model.id)").tag(model.id)
+                                Text(model.promoLabel.map { "\(model.name) · \(model.id)（\($0)）" }
+                                     ?? "\(model.name) · \(model.id)").tag(model.id)
                             }
                         }
                         .labelsHidden()
@@ -200,7 +201,9 @@ struct APIConfigView: View {
     private var modelHint: String {
         if catalog.isRefreshing { return "正在拉取国际域模型列表…" }
         if !catalog.freeModels.isEmpty {
-            return "国际域免费模型（速率 0）共 \(catalog.freeModels.count) 个，可直接选择后复制"
+            let promos = catalog.freeModels.filter { $0.promoLabel != nil }.count
+            let suffix = promos > 0 ? "，其中 \(promos) 个为限时免费" : ""
+            return "国际域免费模型（生效速率 0）共 \(catalog.freeModels.count) 个\(suffix)，可直接选择后复制"
         }
         if let error = catalog.lastError {
             return "模型列表不可用（\(error)），显示最近使用的模型"
