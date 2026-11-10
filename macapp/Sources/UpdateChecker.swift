@@ -5,10 +5,11 @@ import CryptoKit
 /// 上游仓库版本检查与一键更新。
 ///
 /// 版本来源：直接读取本地 `wb2api` 二进制内嵌的 Go 构建信息
-/// （`vcs.revision=<40hex>`）与版本串（`x.y.z-panel`），无需运行 Go 工具链。
-/// 最新版本：GitHub Releases API 的 latest 发布。
+/// （`vcs.revision=<40hex>`）与版本串（`2026.11.10.1958` / 旧版 `x.y.z-panel`），
+/// 无需运行 Go 工具链。
+/// 最新版本：GitHub Releases API 的 latest 发布（维护线 `misakano7545/workbuddy2api-panel`）。
 ///
-/// 更新策略（稳妥）：下载对应 `darwin-<arch>.tar.gz` → 校验 sha256 →
+/// 更新策略（稳妥）：下载对应 `darwin-<arch>.zip` → 校验 sha256 →
 /// 停止服务 → 备份原 `wb2api` → 原子替换 → 重启服务。
 /// 只替换 `wb2api`，绝不触碰 `config.json` / `auths/` / `data/`。
 final class UpdateChecker: ObservableObject {
@@ -28,7 +29,7 @@ final class UpdateChecker: ObservableObject {
     @Published private(set) var currentVersion: String = "—"
 
     private let manager: ProcessManager
-    private let repo = "linguo2625469/workbuddy2api-panel"
+    private let repo = "misakano7545/workbuddy2api-panel"
     private var latestRelease: Release?
     private var timer: Timer?
 
@@ -114,7 +115,7 @@ final class UpdateChecker: ObservableObject {
         #endif
 
         guard let asset = release.assets.first(where: {
-            $0.name.contains("darwin-\(arch)") && $0.name.hasSuffix(".tar.gz")
+            $0.name.contains("darwin-\(arch)") && $0.name.hasSuffix(".zip")
         }) else {
             fail("未找到适用于 macOS \(arch) 的发布包")
             return
@@ -160,12 +161,12 @@ final class UpdateChecker: ObservableObject {
             try fm.createDirectory(at: tmp, withIntermediateDirectories: true)
             defer { try? fm.removeItem(at: tmp) }
 
-            let archive = tmp.appendingPathComponent("update.tar.gz")
+            let archive = tmp.appendingPathComponent("update.zip")
             try data.write(to: archive)
 
             let extractDir = tmp.appendingPathComponent("extract")
             try fm.createDirectory(at: extractDir, withIntermediateDirectories: true)
-            try untar(archive, into: extractDir, entry: "wb2api")
+            try unzip(archive, into: extractDir)
 
             let extracted = extractDir.appendingPathComponent("wb2api")
             guard fm.fileExists(atPath: extracted.path) else {
@@ -238,7 +239,9 @@ final class UpdateChecker: ObservableObject {
             return LocalBuild(version: nil, revision: nil)
         }
         return LocalBuild(
-            version: Self.firstGroup(#"\d+\.\d+\.\d+-panel"#, in: text),
+            // 维护线为四段日期式（2026.11.10.1958），旧线为 x.y.z-panel。
+            // 四段式必须以年份开头，否则会误匹配二进制里的 `16.011.011.1` 之类字节。
+            version: Self.firstGroup(#"(?:19|20)\d{2}\.\d{1,2}\.\d{1,2}\.\d{1,4}|\d+\.\d+\.\d+-panel"#, in: text),
             revision: Self.firstGroup(#"vcs\.revision=([0-9a-f]{40})"#, in: text)
         )
     }
@@ -289,10 +292,11 @@ final class UpdateChecker: ObservableObject {
 
     // MARK: - 解压
 
-    private func untar(_ archive: URL, into directory: URL, entry: String) throws {
+    /// 用 `ditto` 解 zip：保留可执行位，且不会带上 `__MACOSX` 之外的额外层级。
+    private func unzip(_ archive: URL, into directory: URL) throws {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        proc.arguments = ["-xzf", archive.path, "-C", directory.path, entry]
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        proc.arguments = ["-x", "-k", archive.path, directory.path]
         let errPipe = Pipe()
         proc.standardOutput = Pipe()
         proc.standardError = errPipe
