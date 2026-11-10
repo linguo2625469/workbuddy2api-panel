@@ -4,19 +4,22 @@ import Combine
 /// 国际域模型目录。
 ///
 /// 数据来源：网关的 `GET /v1/models`（Bearer 鉴权），它返回的即是国际域（`global:` 前缀）
-/// 模型清单，每个模型带 `credits` 积分倍率。本类把该 JSON **落盘为文档**
-/// （工作目录 `data/models.json`），再从文档中筛选出「国际域且速率为 0（免费）」的模型，
+/// 模型清单，每个模型带 `credits` 积分倍率；若网关同时下发 `promo_credits`
+/// （限时优惠价）则优先按优惠价判定免费。本类把该 JSON **落盘为文档**
+/// （工作目录 `data/models.json`），再从文档中筛选出「国际域且生效倍率为 0」的模型，
 /// 供主窗口「API 配置」弹窗中展示与复制。
 ///
 /// 服务未运行或拉取失败时，自动退回读取已落盘的文档，保证离线也能看到上次结果。
 final class ModelCatalog: ObservableObject {
     static let shared = ModelCatalog(manager: .shared)
 
-    /// 免费（速率 0）的国际域模型。
+    /// 免费（生效倍率 0）的国际域模型。
     struct FreeModel: Identifiable, Equatable {
         let id: String
         let name: String
         let credits: Double
+        /// 非空表示靠限时优惠免费（牌价不为 0），用于在界面上标注。
+        let promoLabel: String?
     }
 
     @Published private(set) var freeModels: [FreeModel] = []
@@ -117,6 +120,15 @@ final class ModelCatalog: ObservableObject {
                 let id: String
                 let name: String?
                 let credits: String?
+                /// 限时优惠价（网关新增字段，未下发时为 nil）。
+                let promoCredits: FlexibleRate?
+                let promoLabel: String?
+
+                enum CodingKeys: String, CodingKey {
+                    case id, name, credits
+                    case promoCredits = "promo_credits"
+                    case promoLabel = "promo_label"
+                }
             }
         }
         guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
@@ -124,14 +136,34 @@ final class ModelCatalog: ObservableObject {
             return
         }
         totalModels = decoded.data.count
-        freeModels = decoded.data.compactMap { model in
+        freeModels = decoded.data.compactMap { model -> FreeModel? in
             guard model.id.hasPrefix(Self.realmPrefix) else { return nil }   // 仅国际域
-            guard let raw = model.credits,
-                  let rate = Self.parseCredits(raw), rate == 0 else { return nil }  // 仅速率 0
+            let listed = model.credits.flatMap(Self.parseCredits)
+            let promo = model.promoCredits.flatMap { Self.parseCredits($0.text) }
+            // 生效倍率取牌价与优惠价中更低的那个（优惠价只可能更便宜）。
+            guard let rate = [listed, promo].compactMap({ $0 }).min(), rate == 0 else { return nil }
             let name = (model.name?.isEmpty == false ? model.name! : String(model.id.dropFirst(Self.realmPrefix.count)))
-            return FreeModel(id: model.id, name: name, credits: rate)
+            let isPromo = (promo == 0) && (listed ?? 1) > 0
+            return FreeModel(id: model.id, name: name, credits: rate,
+                             promoLabel: isPromo ? (model.promoLabel ?? "限时免费") : nil)
         }
         updatedAt = timestamp
+    }
+
+    /// 兼容字符串（`"x0.00"`）与数字（`0`）两种写法的倍率字段。
+    struct FlexibleRate: Decodable {
+        let text: String
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            if let string = try? container.decode(String.self) {
+                text = string
+            } else if let number = try? container.decode(Double.self) {
+                text = String(number)
+            } else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "倍率字段格式不支持")
+            }
+        }
     }
 
     private static let realmPrefix = "global:"
