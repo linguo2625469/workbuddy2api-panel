@@ -64,6 +64,10 @@ type Pool struct {
 	// 仅由选号调用方（server handler）读取：开启后，未带 realm 前缀的请求在首选域
 	// 选不到可用号时改用另一域再选一次；显式 cn:/global: 前缀不受影响。
 	crossDomainFallback bool
+	// freezeOnLowCredit 余额不足（ErrHardCredit）时是否把账号暂时冻结（硬冷却到次日
+	// 04:00 等签到回血）。默认 true = 国内账号保持现状；由 handler 的 applyErrorPolicy
+	// 只读判定，国际版账号无条件豁免（无签到体系）。仅由 SetFreezeOnLowCredit 注入。
+	freezeOnLowCredit bool
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
@@ -101,6 +105,7 @@ func New(stateFp string) *Pool {
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
 		preferExpiring:     true,
+		freezeOnLowCredit:  true,
 		degradeThreshold:   defaultDegradeThreshold,
 		degradeCooldown:    defaultDegradeCooldown,
 		degradeCooldownMax: defaultDegradeCooldownMax,
@@ -214,6 +219,21 @@ func (p *Pool) CrossDomainFallback() bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.crossDomainFallback
+}
+
+// SetFreezeOnLowCredit 注入低积分冻结开关（main 从 config 解析后调用，面板保存配置后
+// 经同一条热应用路径立即生效）。默认 true；false = 余额不足只换号、不写冻结状态。
+func (p *Pool) SetFreezeOnLowCredit(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.freezeOnLowCredit = enabled
+}
+
+// FreezeOnLowCredit 报告低积分冻结开关当前状态（applyErrorPolicy 只读，热改安全）。
+func (p *Pool) FreezeOnLowCredit() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.freezeOnLowCredit
 }
 
 // SetDegrade 注入连败降权参数（main 从 config 解析后调用，issue #114）。

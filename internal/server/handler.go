@@ -1410,7 +1410,9 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 // 会立即 400 返回，其余种类 continue 换号（continue 前由 rotateBackoff 退避）。
 //
 // 十条路径，各司其职：
-//   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
+//   - ErrHardCredit → 开关 pool.freeze_on_low_credit（默认 true）开启且账号为国内版时，
+//     CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）；关闭只换号，
+//     国际版账号一律豁免（无签到体系）。
 //   - ErrSoftRate → 优先对齐上游重置墙钟（带「将在 … 重置」时 6004 走模型级豁免、
 //     非 6004 走账号级，均不指数堆加）；无重置时间才走有界退避。冷却时长优先采信
 //     Retry-After 头（uerr.RetryAfter，body 文案墙钟之外的头形态来源）。
@@ -1442,7 +1444,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
 		// 不需要异步核查（冗余）。立即换号。
-		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
+		// 闸门：开关关闭（只换号不冻结）或国际版账号一律跳过。国际版无每日签到体系，
+		// "冻到次日 04:00 等签到回血"没有恢复前提，冻住后只能人工 revive——故恒豁免。
+		// a == nil（账号已被移除）按 CN 处理；Cooldown 对未知 uid 本就是 no-op。
+		a := h.cfg.Pool.AuthByUID(uid)
+		if h.cfg.Pool.FreezeOnLowCredit() && (a == nil || !a.IsGlobal()) {
+			h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
+		}
 	case upstream.ErrSoftRate:
 		// 统一对齐上游重置时间：只要 body 带「将在 … 重置」，无论业务 code 是
 		// 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不指数堆加。

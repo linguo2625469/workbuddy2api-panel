@@ -97,6 +97,7 @@
     "expiring_soon": "168h",
     "cost_explore_interval": "30m",
     "credit_floor": 100,
+    "freeze_on_low_credit": true,
     "cross_domain_fallback": false
   },
   "session_sticky": {

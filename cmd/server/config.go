@@ -240,6 +240,11 @@ type Config struct {
 		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
 		// 默认 0 = 关闭；负值钳 0。
 		CreditFloor int64 `json:"credit_floor"`
+		// FreezeOnLowCredit 余额不足（ErrHardCredit）时是否把账号暂时冻结（硬冷却到
+		// 次日 04:00 等签到回血，面板可手动解冻）。默认 true = 国内账号保持现状；
+		// 关闭后该类错误只换号、不写冻结状态。国际版账号一律不冻结（无每日签到
+		// 体系，"等签到回血"的恢复前提不成立），与本开关无关。
+		FreezeOnLowCredit bool `json:"freeze_on_low_credit"`
 		// CrossDomainFallback 裸模型名跨域回退开关（issue #135），默认 false（零回归）。
 		// 开启后：请求模型名不带 realm 前缀时，首选域（cn）选不到可用账号（账号级冷却/
 		// 熔断/在途占满，或该域账号对这个模型 11102 后进入模型级负缓存）会自动改用
@@ -332,6 +337,8 @@ func Default() *Config {
 	c.Pool.IdleWeightPerHour = 0.5
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.PreferExpiring = true
+	// 低积分冻结缺省 true（缺省 true 靠显式赋值：键缺席保留此值，只有显式 false 才关）。
+	c.Pool.FreezeOnLowCredit = true
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
