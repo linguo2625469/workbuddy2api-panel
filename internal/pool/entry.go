@@ -544,6 +544,9 @@ const softStreakShiftMax = 16
 const (
 	defaultIdleWeightPerHour = 0.5
 	defaultIdleWeightMax     = 5.0
+	// defaultExpiringWeight 快过期账号的默认权重倍数（= expiringVirtualSlots 的历史
+	// 口径，保持零回归）。可经 config pool.expiring_weight 覆盖。
+	defaultExpiringWeight = expiringVirtualSlots
 )
 
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。

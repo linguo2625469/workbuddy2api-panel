@@ -60,6 +60,11 @@ type Pool struct {
 	// preferExpiring 最早到期优先路由开关（默认 true）。开启且快过期窗口内存在有效
 	// 批次时，选号在成本层内先按最早到期排序；关闭后只使用普通加权路由。
 	preferExpiring bool
+	// expiringWeight 快过期账号的权重倍数（SetExpiringWeight 注入；默认
+	// defaultExpiringWeight=3）。命中快过期窗口的账号在加权路由里权重 ×该值，
+	// 同时在新会话候选集里占该值个虚拟实例。值越大越快清空快过期余额，
+	// 但过大时会把请求过度集中到少数账号（在途上限/风控随之承压）。
+	expiringWeight float64
 	// maxInFlight 单账号最大在途请求数；0 = 不限（租约关闭）。
 	maxInFlight int
 	// maxInFlightGlobal global 域单账号在途上限分档（WAF 403 修复 P1-1：global 域
@@ -93,6 +98,7 @@ func New(stateFp string) *Pool {
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
 		preferExpiring:     true,
+		expiringWeight:     defaultExpiringWeight,
 		degradeThreshold:   defaultDegradeThreshold,
 		degradeCooldown:    defaultDegradeCooldown,
 		degradeCooldownMax: defaultDegradeCooldownMax,
@@ -191,6 +197,21 @@ func (p *Pool) SetPreferExpiring(enabled bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.preferExpiring = enabled
+}
+
+// SetExpiringWeight 注入快过期账号的权重倍数（main 从 config 解析后调用）。
+// 非正值保留原值（用默认 defaultExpiringWeight），小于 1 钳到 1（= 无偏好，
+// 与关闭 prefer_expiring 等价但保留窗口判定）。风格同 SetWeights。
+func (p *Pool) SetExpiringWeight(w float64) {
+	if w <= 0 {
+		return // 缺省/非法：保留默认倍数
+	}
+	if w < 1 {
+		w = 1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.expiringWeight = w
 }
 
 // SetDegrade 注入连败降权参数（main 从 config 解析后调用，issue #114）。

@@ -859,3 +859,33 @@ func TestServerReadTimeout(t *testing.T) {
 		t.Error("unparsable read_timeout should fail fast")
 	}
 }
+
+// TestExpiringWeightDefaultAndClamp 锁定 pool.expiring_weight 的解析口径：
+// 缺省/0/负值 → 3（历史 expiringVirtualSlots），(0,1) → 1（无偏好），>=1 原样保留。
+func TestExpiringWeightDefaultAndClamp(t *testing.T) {
+	cases := []struct {
+		body string
+		want float64
+	}{
+		{`{}`, 3},
+		{`{"pool":{"expiring_weight":0}}`, 3},
+		{`{"pool":{"expiring_weight":-4}}`, 3},
+		{`{"pool":{"expiring_weight":0.4}}`, 1},
+		{`{"pool":{"expiring_weight":1}}`, 1},
+		{`{"pool":{"expiring_weight":8}}`, 8},
+	}
+	for _, tc := range cases {
+		dir := t.TempDir()
+		fp := filepath.Join(dir, "c.json")
+		if err := os.WriteFile(fp, []byte(tc.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(fp)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.body, err)
+		}
+		if c.Pool.ExpiringWeight != tc.want {
+			t.Errorf("%s: expiring_weight=%v want %v", tc.body, c.Pool.ExpiringWeight, tc.want)
+		}
+	}
+}

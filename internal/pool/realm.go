@@ -2,13 +2,25 @@
 package pool
 
 import (
+	"math"
 	"sort"
 	"time"
 )
 
-// expiringVirtualSlots 快过期账号在新会话候选集中的虚拟实例权重。
+// expiringVirtualSlots 快过期账号在新会话候选集中的默认虚拟实例权重
+// （= defaultExpiringWeight，可经 config pool.expiring_weight 覆盖）。
 // 3:1 是温和偏好，不是固定比例：账号组成变化会自然改变最终占比。
 const expiringVirtualSlots = 3
+
+// expiringSlots 返回快过期账号占用的虚拟实例数：由 p.expiringWeight 四舍五入，
+// 下限 1（1 = 无偏好，与普通账号同权）。调用方需已持 p.mu。
+func (p *Pool) expiringSlots() int {
+	n := int(math.Round(p.expiringWeight))
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
 
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // realm=="" 退化为 AvailableUIDs（现状语义）。
@@ -65,7 +77,7 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 		slots := 1
 		if p.preferExpiring {
 			if e := p.byUID[uid]; expiringNow(e, now) {
-				slots = expiringVirtualSlots
+				slots = p.expiringSlots()
 			}
 		}
 		for i := 0; i < slots; i++ {

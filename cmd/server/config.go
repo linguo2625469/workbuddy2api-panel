@@ -191,9 +191,14 @@ type Config struct {
 		// 关闭后完全不使用到期信息选号。
 		PreferExpiring bool `json:"prefer_expiring"`
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
-		// 此窗口内的批次令账号命中上述 ×3 加权；窗口开大 → 命中账号变多、
+		// 此窗口内的批次令账号命中上述加权；窗口开大 → 命中账号变多、
 		// 偏好被稀释。空/0 = 禁用该加权门槛。
 		ExpiringSoon string `json:"expiring_soon"`
+		// ExpiringWeight 快过期账号的权重倍数（默认 3）。命中 expiring_soon 窗口的
+		// 账号在加权路由里权重 ×该值，并在新会话候选集里占该值个虚拟实例。
+		// 调大可加速清空快过期余额，但过度集中会顶到 max_in_flight / 触发上游风控；
+		// 0/负值回落默认 3，小于 1 钳到 1（= 无偏好）。
+		ExpiringWeight float64 `json:"expiring_weight"`
 		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
 		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切
 		// tier 1-only（探索=搭车改道，零新增上游请求；成功即毕业，失败走既有
@@ -288,6 +293,7 @@ func Default() *Config {
 	c.Pool.IdleWeightMax = 5.0
 	c.Pool.PreferExpiring = true
 	c.Pool.ExpiringSoon = "168h" // 快过期窗口默认 7 天：官方活动奖励积分多在两周内过期
+	c.Pool.ExpiringWeight = 3    // 快过期加权倍数默认 3（与历史 expiringVirtualSlots 一致）
 	// costTier 探索默认 30m（issue #136：垄断破除 + 搭车改道零新增请求）；"0" 关停。
 	c.Pool.CostExploreInterval = "30m"
 	c.SessionSticky.Enabled = true
@@ -449,6 +455,11 @@ func applyEnv(c *Config) {
 			c.Pool.PreferExpiring = b
 		}
 	}
+	if v := os.Getenv("WB2A_EXPIRING_WEIGHT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			c.Pool.ExpiringWeight = f
+		}
+	}
 }
 
 func (c *Config) normalize() error {
@@ -510,6 +521,12 @@ func (c *Config) normalize() error {
 	if c.ExpiringSoonDur < 0 {
 		c.ExpiringSoonDur = 0
 		c.Pool.ExpiringSoon = "0"
+	}
+	// 快过期加权倍数：0/负值回落默认 3（= 未配置语义），小于 1 钳 1（无偏好）。
+	if c.Pool.ExpiringWeight <= 0 {
+		c.Pool.ExpiringWeight = 3
+	} else if c.Pool.ExpiringWeight < 1 {
+		c.Pool.ExpiringWeight = 1
 	}
 	// costTier 探索窗口（issue #136）：空值回落默认 30m（Default 已置；此兜底覆盖
 	// 显式 ""）；"0" 是合法值（关停，完全回到现状行为），不回落；负值钳 0 同关停

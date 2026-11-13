@@ -433,10 +433,11 @@ func expiringNow(e *entry, now time.Time) bool {
 
 // routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false
 // 或账号无有效快过期批次时，实例数恒为 1，结果与旧 weightOf 完全一致。
+// 倍数取 p.expiringWeight（config pool.expiring_weight，默认 3）。
 func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	w := p.weightOf(e, maxCredits, now)
 	if p.preferExpiring && expiringNow(e, now) {
-		return w * expiringVirtualSlots
+		return w * p.expiringWeight
 	}
 	return w
 }

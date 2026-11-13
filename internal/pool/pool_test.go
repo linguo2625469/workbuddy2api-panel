@@ -1814,6 +1814,52 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	}
 }
 
+// TestSetExpiringWeightScalesRouting 锁定 config pool.expiring_weight 的生效口径：
+// 合法值按倍数放大，小于 1 钳到 1（= 与普通账号同权），非正值保留原值
+// （缺省语义由 config.normalize 兜成 3，见 cmd/server 的配置测试）。
+func TestSetExpiringWeightScalesRouting(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "a"})
+	p.Add(&auth.Auth{UID: "b"})
+	now := time.Now()
+	p.SetCreditsDetailed("a", 100, 100, 50, now.Add(time.Hour), 50)
+	p.SetCreditsDetailed("b", 100, 100, 0, time.Time{}, 0)
+
+	weightOfA := func() float64 {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.routingWeightOf(p.byUID["a"], 100, now)
+	}
+	baseOfB := func() float64 {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.routingWeightOf(p.byUID["b"], 100, now)
+	}
+	base := baseOfB()
+
+	cases := []struct {
+		set  float64
+		want float64
+	}{
+		{8, 8},                                       // 显式放大
+		{0, 8},                                       // 非正值保留原值（当前 8）
+		{-2, 8},                                      // 负值同上
+		{0.4, 1},                                     // <1 钳 1（无偏好）
+		{1, 1},                                       // 恰好 1
+		{expiringVirtualSlots, expiringVirtualSlots}, // 与历史口径一致
+	}
+	for _, c := range cases {
+		p.SetExpiringWeight(c.set)
+		if got := weightOfA(); got != base*c.want {
+			t.Fatalf("SetExpiringWeight(%v): weight=%v want %v", c.set, got, base*c.want)
+		}
+		// 非快过期账号不受倍数影响。
+		if got := baseOfB(); got != base {
+			t.Fatalf("SetExpiringWeight(%v): 非快过期账号 weight=%v want %v", c.set, got, base)
+		}
+	}
+}
+
 func TestCreditExpirySnapshotConsumptionAndClear(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})

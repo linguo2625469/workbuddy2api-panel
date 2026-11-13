@@ -77,6 +77,7 @@
     "idle_weight_max": 5.0,
     "prefer_expiring": true,
     "expiring_soon": "168h",
+    "expiring_weight": 3,
     "cost_explore_interval": "30m",
     "credit_floor": 100
   },
