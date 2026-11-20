@@ -1818,8 +1818,8 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	p.SetCreditsDetailed("b", 100, 100, 0, time.Time{}, 0)
 
 	p.mu.Lock()
-	we := p.routingWeightOf(p.byUID["a"], 100, now)
-	wn := p.routingWeightOf(p.byUID["b"], 100, now)
+	we := p.routingWeightOf(p.byUID["a"], 100, 50, now)
+	wn := p.routingWeightOf(p.byUID["b"], 100, 50, now)
 	p.mu.Unlock()
 	if we != wn*expiringVirtualSlots {
 		t.Fatalf("enabled expiring weight=%v want %v", we, wn*expiringVirtualSlots)
@@ -1828,11 +1828,40 @@ func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
 	p.SetPreferExpiring(false)
 
 	p.mu.Lock()
-	wa := p.routingWeightOf(p.byUID["a"], 100, now)
-	wb := p.routingWeightOf(p.byUID["b"], 100, now)
+	wa := p.routingWeightOf(p.byUID["a"], 100, 50, now)
+	wb := p.routingWeightOf(p.byUID["b"], 100, 50, now)
 	p.mu.Unlock()
 	if wa != wb {
 		t.Fatalf("disabled expiring weights differ: %v/%v", wa, wb)
+	}
+}
+
+// TestExpiringMultiplierScalesByRemaining 快过期加权按剩余量成比例：总积分相同、
+// 只有快过期剩余不同的三个号，权重应满足 多 > 少 > 无，而不是「有快过期就都 ×3」。
+// 这修复「快过期少的号反而用得更多」：加成随剩余量增加，快过期多的号更快被烧掉。
+func TestExpiringMultiplierScalesByRemaining(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "big"})
+	p.Add(&auth.Auth{UID: "small"})
+	p.Add(&auth.Auth{UID: "none"})
+	now := time.Now()
+	at := now.Add(time.Hour)
+	p.SetCreditsDetailed("big", 100, 100, 100, at, 100)
+	p.SetCreditsDetailed("small", 100, 100, 20, at, 20)
+	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
+
+	p.mu.Lock()
+	wBig := p.routingWeightOf(p.byUID["big"], 100, 100, now)
+	wSmall := p.routingWeightOf(p.byUID["small"], 100, 100, now)
+	wNone := p.routingWeightOf(p.byUID["none"], 100, 100, now)
+	p.mu.Unlock()
+
+	if !(wBig > wSmall && wSmall > wNone) {
+		t.Fatalf("快过期剩余越多权重应越高：big=%v small=%v none=%v", wBig, wSmall, wNone)
+	}
+	// 剩余最大者拿满 expiringVirtualSlots（与旧实现封顶一致，零回归）。
+	if wBig != wNone*expiringVirtualSlots {
+		t.Fatalf("big=%v 应为 none=%v 的 %d 倍", wBig, wNone, expiringVirtualSlots)
 	}
 }
 

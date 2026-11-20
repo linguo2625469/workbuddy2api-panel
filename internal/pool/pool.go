@@ -57,8 +57,10 @@ type Pool struct {
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64
-	// preferExpiring 最早到期优先路由开关（默认 true）。开启且快过期窗口内存在有效
-	// 批次时，选号在成本层内先按最早到期排序；关闭后只使用普通加权路由。
+	// preferExpiring 快过期积分加权开关（默认 true）。开启且快过期窗口内存在有效批次
+	// 时，按「快过期剩余积分占候选集最大值的比例」把选号权重从 ×1 线性放大到 ×3
+	// （剩余越多越大；最大者 ×3），见 routingWeightOf / expiringMultiplier。关闭后只用
+	// 普通加权路由。
 	preferExpiring bool
 	// crossDomainFallback 裸模型名跨域回退开关（默认 false = 零回归，issue #135）。
 	// 仅由选号调用方（server handler）读取：开启后，未带 realm 前缀的请求在首选域

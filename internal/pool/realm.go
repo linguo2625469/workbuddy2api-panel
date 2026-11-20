@@ -2,13 +2,29 @@
 package pool
 
 import (
+	"math"
 	"sort"
 	"time"
 )
 
-// expiringVirtualSlots 快过期账号在新会话候选集中的虚拟实例权重。
-// 3:1 是温和偏好，不是固定比例：账号组成变化会自然改变最终占比。
+// expiringVirtualSlots 快过期账号在候选集中的最大虚拟实例权重（倍数上限）。
+// 实际倍数按「快过期剩余量占候选集最大值的比例」从 1 线性升到本值（见
+// expiringMultiplier / expiringSlots）——快过期越多越接近满额，不再「有就 ×3」。
 const expiringVirtualSlots = 3
+
+// expiringSlots 把快过期加权倍数取整成虚拟实例数（1 ~ expiringVirtualSlots），
+// 供新会话候选集按剩余量成比例加权：剩余量最大者取满 expiringVirtualSlots，其余按
+// expiringMultiplier 四舍五入（至少 1 次，保持普通账号的基线出现次数）。
+func expiringSlots(expiring, maxExpiring int64) int {
+	slots := int(math.Round(expiringMultiplier(expiring, maxExpiring)))
+	if slots < 1 {
+		return 1
+	}
+	if slots > expiringVirtualSlots {
+		return expiringVirtualSlots
+	}
+	return slots
+}
 
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // realm=="" 退化为 AvailableUIDs（现状语义）。
@@ -65,9 +81,10 @@ func (p *Pool) ServableForModelRealm(model, realm string) int {
 
 // WeightedAvailableUIDsForModelRealm 返回带虚拟实例权重的可用账号列表。
 //
-// 普通账号出现 1 次；有效快过期账号出现 expiringVirtualSlots 次。调用方继续按
-// 原有序列表哈希，即可让新会话对快过期账号形成温和偏好。重复项按 UID 排序后
-// 展开，保证同一账号拓扑下不同进程得到一致列表。
+// 普通账号出现 1 次；有效快过期账号按「快过期剩余量占候选集最大值的比例」出现
+// 1 ~ expiringVirtualSlots 次（剩余最多者取满）。调用方继续按原有序列表哈希，即可
+// 让新会话对快过期积分多的账号形成更强偏好。重复项按 UID 排序后展开，保证同一
+// 账号拓扑下不同进程得到一致列表。
 //
 // 该方法是现有 AvailableUIDsForModelRealm 的增量入口，不改变旧方法语义，也不
 // 修改配置、状态或 Redis schema。prefer_expiring=false 时退化为逐账号一次。
@@ -76,6 +93,7 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 	defer p.mu.RUnlock()
 	now := time.Now()
 	uids := make([]string, 0, len(p.byUID))
+	var maxExpiring int64
 	for uid, e := range p.byUID {
 		if realm != "" && e.a.Realm() != realm {
 			continue
@@ -87,6 +105,9 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 			continue
 		}
 		uids = append(uids, uid)
+		if p.preferExpiring && expiringNow(e, now) && e.creditsExpiring > maxExpiring {
+			maxExpiring = e.creditsExpiring
+		}
 	}
 	sort.Strings(uids)
 
@@ -95,7 +116,7 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 		slots := 1
 		if p.preferExpiring {
 			if e := p.byUID[uid]; expiringNow(e, now) {
-				slots = expiringVirtualSlots
+				slots = expiringSlots(e.creditsExpiring, maxExpiring)
 			}
 		}
 		for i := 0; i < slots; i++ {

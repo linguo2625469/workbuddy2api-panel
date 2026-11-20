@@ -92,6 +92,16 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 			maxCredits = e.credits
 		}
 	}
+	// maxExpiring 候选集内最大「窗口内快过期剩余积分」，供快过期加权按比例归一
+	// （剩余越多倍数越大，见 expiringMultiplier）。prefer_expiring 关闭时不计算。
+	var maxExpiring int64
+	if p.preferExpiring {
+		for _, e := range cands {
+			if expiringNow(e, now) && e.creditsExpiring > maxExpiring {
+				maxExpiring = e.creditsExpiring
+			}
+		}
+	}
 	// 成本分层（reqModel 非空时）：按该模型的实测扣费把候选分层，只保留最优层。
 	//   0 = 已实测免费（限免期/夜间免费的号，最强偏好）
 	//   1 = 无观测（含观测过期）
@@ -156,7 +166,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	for _, e := range cands {
 		ti, ci := costTier(e)
 		if ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, maxExpiring, now), tier: ti, cost1k: ci})
 		}
 	}
 	if strategy := p.strategyForRealmLocked(realm); strategy != WeightedRandom {
@@ -387,11 +397,19 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 			maxCredits = e.credits
 		}
 	}
+	var maxExpiring int64
+	if p.preferExpiring {
+		for _, e := range cands {
+			if expiringNow(e, now) && e.creditsExpiring > maxExpiring {
+				maxExpiring = e.creditsExpiring
+			}
+		}
+	}
 	const scale = 1_000_000 // 定点放大：int64 累加权重大整数抽签
 	weights := make([]int64, len(cands))
 	var total int64
 	for i, e := range cands {
-		w := p.routingWeightOf(e, maxCredits, now)
+		w := p.routingWeightOf(e, maxCredits, maxExpiring, now)
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}
@@ -448,12 +466,34 @@ func expiringNow(e *entry, now time.Time) bool {
 		e.creditsEarliestExpiry.After(now)
 }
 
-// routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false
-// 或账号无有效快过期批次时，实例数恒为 1，结果与旧 weightOf 完全一致。
-func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
+// expiringMultiplier 快过期加权倍数（1.0 ~ expiringVirtualSlots），按「快过期剩余
+// 积分」占候选集最大值的比例线性插值：
+//
+//	剩余量 = 候选集最大 → expiringVirtualSlots（×3，与旧实现封顶一致）
+//	剩余量越小        → 越接近 1.0（无偏好）
+//	剩余量为 0        → 1.0
+//
+// 旧实现是「窗口内有任意快过期批次就 ×3」，不区分快过期多少——两个都有快过期的
+// 账号加成相同，最终谁多由总积分主导，导致「快过期少的号反而用得更多」。改成按
+// 剩余量成比例后，快过期多的号拿到更大倍数、更快烧掉；单账号/等量场景的乘数仍
+// 恰为 expiringVirtualSlots，保证既有分布与零回归。
+func expiringMultiplier(expiring, maxExpiring int64) float64 {
+	if expiring <= 0 || maxExpiring <= 0 {
+		return 1.0
+	}
+	frac := float64(expiring) / float64(maxExpiring)
+	if frac > 1 {
+		frac = 1
+	}
+	return 1.0 + float64(expiringVirtualSlots-1)*frac
+}
+
+// routingWeightOf 在普通账号权重上叠加快过期加权倍数。prefer_expiring=false 或账号
+// 无有效快过期批次时倍数为 1，结果与旧 weightOf 完全一致。
+func (p *Pool) routingWeightOf(e *entry, maxCredits, maxExpiring int64, now time.Time) float64 {
 	w := p.weightOf(e, maxCredits, now)
 	if p.preferExpiring && expiringNow(e, now) {
-		return w * expiringVirtualSlots
+		return w * expiringMultiplier(e.creditsExpiring, maxExpiring)
 	}
 	return w
 }

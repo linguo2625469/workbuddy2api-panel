@@ -221,13 +221,13 @@ type Config struct {
 		IdleWeightPerHour  float64 `json:"idle_weight_per_hour"` // 闲置补偿：每小时未用 +0.5 权重
 		IdleWeightMax      float64 `json:"idle_weight_max"`      // 闲置补偿封顶，默认 5.0
 		// PreferExpiring 快过期积分加权开关，默认 true。开启且 expiring_soon 窗口内
-		// 存在有效批次时，该账号选号权重 ×3（虚拟实例，见 pool 路由加权）；
-		// 不按到期时间排序、与批次金额无关（issue #101 对齐实现口径）。
-		// 关闭后完全不使用到期信息选号。
+		// 存在有效批次时，该账号选号权重按「窗口内快过期剩余积分占候选集最大值的
+		// 比例」从 ×1 线性升到 ×3（剩余越多倍数越大；最大者 ×3）——让快过期多的号
+		// 更快被用掉，而非「有快过期就一律 ×3」。关闭后完全不使用到期信息选号。
 		PreferExpiring bool `json:"prefer_expiring"`
 		// ExpiringSoon 快过期积分窗口（如 "168h"=7天）：签到/余额刷新时，到期时间在
-		// 此窗口内的批次令账号命中上述 ×3 加权；窗口开大 → 命中账号变多、
-		// 偏好被稀释。空/0 = 禁用该加权门槛。
+		// 此窗口内的批次计入上述快过期加权；窗口开大 → 命中批次/账号变多。空/0 = 该
+		// 加权不生效（creditsExpiring 恒 0）。
 		ExpiringSoon string `json:"expiring_soon"`
 		// CostExploreInterval costTier 条件探索窗口（issue #136 方案 a′）：tier 0
 		// 垄断层存在且 tier 1 有成员时，距上次探索 ≥ 窗口则本次 pick 生效层切

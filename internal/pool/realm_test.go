@@ -105,6 +105,24 @@ func TestWeightedAvailableUIDsForModelRealm(t *testing.T) {
 	}
 }
 
+// TestWeightedAvailableUIDsProportionalSlots 快过期虚拟实例数按剩余量成比例：
+// 剩余最多者取满 expiringVirtualSlots 次、次之按比例（1+2*0.6 四舍五入 = 2）、
+// 无快过期者 1 次——不再是「有快过期就都 3 次」。
+func TestWeightedAvailableUIDsProportionalSlots(t *testing.T) {
+	p := realmPool(t)
+	now := time.Now()
+	at := now.Add(time.Hour)
+	// 仅 cn 域两号设快过期，剩余量 100:60。
+	p.SetCreditsDetailed("cn1", 100, 100, 100, at, 100)
+	p.SetCreditsDetailed("cn2", 100, 100, 60, at, 60)
+
+	got := p.WeightedAvailableUIDsForModelRealm("glm-5.2", "cn")
+	want := []string{"cn1", "cn1", "cn1", "cn2", "cn2"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("proportional slots=%v want %v", got, want)
+	}
+}
+
 func TestPickExcludingForRealm(t *testing.T) {
 	p := realmPool(t)
 	// realm=cn → 只从 cn 集合选。
