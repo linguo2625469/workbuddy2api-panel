@@ -48,3 +48,10 @@ server.exe
 
 # CodeGraph 本地索引
 .codegraph/
+
+# Android build artifacts
+android/.gradle/
+android/local.properties
+android/**/build/
+android/app/libs/*.aar
+android/app/libs/*.jar

@@ -1,0 +1,5 @@
+<resources>
+    <style name="Theme.WbCheckin" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+</resources>
