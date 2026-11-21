@@ -4,6 +4,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 command -v go >/dev/null || { echo "go not found in PATH" >&2; exit 1; }
+if ! grep -q 'golang.org/x/mobile' go.mod; then
+    echo "go.mod 缺少 golang.org/x/mobile（gomobile bind 依赖）。" >&2
+    echo "修复：go get golang.org/x/mobile@latest 后重新运行本脚本。" >&2
+    exit 1
+fi
 # Git Bash 的 go env GOPATH 返回 Windows 路径（C:\...），需转成 POSIX 形式才能加入 PATH。
 gopath_bin="$(go env GOPATH)/bin"
 if command -v cygpath >/dev/null 2>&1; then
