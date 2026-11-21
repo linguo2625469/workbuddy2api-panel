@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
@@ -254,5 +256,91 @@ func TestCheckinUnknownUID(t *testing.T) {
 	e := f.engine(t.TempDir())
 	if _, err := e.Checkin("missing"); err == nil {
 		t.Fatalf("want error for missing uid")
+	}
+}
+
+func TestCheckinRefreshesExpiringToken(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.refreshBody = `{"code":0,"msg":"ok","data":{"accessToken":"new-at","refreshToken":"new-rt","expiresIn":5184000,"domain":"codebuddy.cn"}}`
+	dir := t.TempDir()
+	e := f.engine(dir)
+	soon := time.Now().Add(time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "old-at", "old-rt", soon, "")); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	raw, err := e.Checkin("u1")
+	if err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	r := decodeResult(t, raw)
+	if r.Status != "ok" {
+		t.Fatalf("result=%+v", r)
+	}
+	if f.refreshHits.Load() != 1 {
+		t.Fatalf("refresh hits=%d want 1", f.refreshHits.Load())
+	}
+	if f.lastAuth != "Bearer new-at" {
+		t.Fatalf("checkin authorization=%q want Bearer new-at", f.lastAuth)
+	}
+
+	saved, err := os.ReadFile(filepath.Join(dir, "workbuddy-u1.json"))
+	if err != nil {
+		t.Fatalf("read saved: %v", err)
+	}
+	a, err := auth.Parse(saved)
+	if err != nil {
+		t.Fatalf("parse saved: %v", err)
+	}
+	if a.AccessTokenValue() != "new-at" {
+		t.Fatalf("saved accessToken=%q", a.AccessTokenValue())
+	}
+	if a.RefreshTokenValue() != "new-rt" {
+		t.Fatalf("saved refreshToken=%q", a.RefreshTokenValue())
+	}
+}
+
+func TestCheckinAuthInvalidOnDeadRefresh(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.refreshCode = http.StatusUnauthorized
+	f.refreshBody = `{"code":12153,"msg":"Offline user session not found"}`
+	e := f.engine(t.TempDir())
+	soon := time.Now().Add(time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "old-at", "old-rt", soon, "")); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	raw, err := e.Checkin("u1")
+	if err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	r := decodeResult(t, raw)
+	if r.Status != "auth_invalid" {
+		t.Fatalf("result=%+v", r)
+	}
+	if f.checkinHits.Load() != 0 {
+		t.Fatalf("checkin hits=%d want 0", f.checkinHits.Load())
+	}
+}
+
+func TestCheckinAuthInvalidWithoutRefreshToken(t *testing.T) {
+	f := newFakeUpstream(t)
+	e := f.engine(t.TempDir())
+	soon := time.Now().Add(time.Hour).Unix()
+	doc := `{"auth":{"accessToken":"old-at","expiresAt":` + strconv.FormatInt(soon, 10) + `,"domain":"codebuddy.cn"},"account":{"uid":"u1","nickname":"一号"}}`
+	if _, err := e.ImportAccount(doc); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	raw, err := e.Checkin("u1")
+	if err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	r := decodeResult(t, raw)
+	if r.Status != "auth_invalid" {
+		t.Fatalf("result=%+v", r)
+	}
+	if f.refreshHits.Load() != 0 || f.checkinHits.Load() != 0 {
+		t.Fatalf("unexpected hits refresh=%d checkin=%d", f.refreshHits.Load(), f.checkinHits.Load())
 	}
 }

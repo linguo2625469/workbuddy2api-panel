@@ -5,6 +5,7 @@ package mobile
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ const (
 	requestTimeout = 35 * time.Second
 	dnsPrimary     = "223.5.5.5"
 	dnsSecondary   = "119.29.29.29"
+	refreshWindow  = 2 * time.Hour
 )
 
 // Engine 持有账号目录与上游客户端；每个方法都可从任意线程调用。
@@ -149,7 +151,9 @@ func (e *Engine) Checkin(uid string) (string, error) {
 	case a.IsGlobal():
 		r.Status, r.Message = "skipped", "国际版账号无签到体系（已跳过）"
 	default:
-		if err := e.up.DailyCheckin(a); err != nil {
+		if st, msg, done := e.refreshIfNeeded(a); done {
+			r.Status, r.Message = st, msg
+		} else if err := e.up.DailyCheckin(a); err != nil {
 			if upstream.IsAlreadyCheckin(err) {
 				r.Status, r.Message = "already", "今天已签到"
 			} else {
@@ -160,6 +164,31 @@ func (e *Engine) Checkin(uid string) (string, error) {
 		}
 	}
 	return marshal(r)
+}
+
+// refreshIfNeeded 在 token 临近过期时刷新并写回；done=true 表示不应继续签到。
+func (e *Engine) refreshIfNeeded(a *auth.Auth) (status, message string, done bool) {
+	if !a.NeedsRefresh(refreshWindow) {
+		return "", "", false
+	}
+	if a.RefreshTokenValue() == "" {
+		return "auth_invalid", "凭证已过期且无 refreshToken，请重新导入该账号文件", true
+	}
+	if err := e.up.RefreshToken(a); err != nil {
+		if isSessionDead(err) {
+			return "auth_invalid", "凭证已失效，请重新导入该账号文件", true
+		}
+		return "failed", "刷新凭证失败：" + short(err.Error()), true
+	}
+	if err := a.SaveAtomic(); err != nil {
+		return "failed", "token 刷新成功但写回失败：" + short(err.Error()), true
+	}
+	return "", "", false
+}
+
+func isSessionDead(err error) bool {
+	var ue *upstream.Error
+	return errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead
 }
 
 func (e *Engine) load(uid string) (*auth.Auth, error) {
