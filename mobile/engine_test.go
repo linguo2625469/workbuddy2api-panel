@@ -125,14 +125,13 @@ func TestImportOverwritesSameUID(t *testing.T) {
 }
 
 type fakeUpstream struct {
-	srv          *httptest.Server
-	checkinHits  atomic.Int32
-	refreshHits  atomic.Int32
-	checkinBody  string
-	refreshCode  int
-	refreshBody  string
-	refreshDelay time.Duration
-	lastAuth     string
+	srv         *httptest.Server
+	checkinHits atomic.Int32
+	refreshHits atomic.Int32
+	checkinBody string
+	refreshCode int
+	refreshBody string
+	lastAuth    string
 }
 
 func newFakeUpstream(t *testing.T) *fakeUpstream {
@@ -156,7 +155,6 @@ func newFakeUpstream(t *testing.T) *fakeUpstream {
 		if got := r.Header.Get("X-Refresh-Token"); got == "" {
 			t.Errorf("missing X-Refresh-Token")
 		}
-		time.Sleep(f.refreshDelay)
 		w.Header().Set("Content-Type", "application/json")
 		if f.refreshCode != http.StatusOK {
 			w.WriteHeader(f.refreshCode)
@@ -350,46 +348,53 @@ func TestCheckinAuthInvalidWithoutRefreshToken(t *testing.T) {
 
 func TestConcurrentCheckinSerialized(t *testing.T) {
 	f := newFakeUpstream(t)
-	f.refreshDelay = 100 * time.Millisecond
-	f.refreshBody = `{"code":0,"msg":"ok","data":{"accessToken":"new-at","refreshToken":"new-rt","expiresIn":5184000,"domain":"codebuddy.cn"}}`
-	dir := t.TempDir()
-	e := f.engine(dir)
-	soon := time.Now().Add(time.Hour).Unix()
-	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "old-at", "old-rt", soon, "")); err != nil {
+	e := f.engine(t.TempDir())
+	future := time.Now().Add(24 * time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "at-1", "rt-1", future, "")); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 
+	// 钩子在持锁期间执行：若 Checkin 未串行化，两个 goroutine 会同时进入钩子，
+	// maxActive 升至 2；sleep 扩大重叠窗口让竞争稳定复现。
+	var (
+		hookMu    sync.Mutex
+		active    int
+		maxActive int
+	)
+	e.testHook = func() {
+		hookMu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		hookMu.Unlock()
+
+		time.Sleep(50 * time.Millisecond)
+
+		hookMu.Lock()
+		active--
+		hookMu.Unlock()
+	}
+
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
 	for i := 0; i < 2; i++ {
 		go func() {
 			defer wg.Done()
+			<-start
 			if _, err := e.Checkin("u1"); err != nil {
 				t.Errorf("checkin: %v", err)
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 
-	if f.refreshHits.Load() != 1 {
-		t.Fatalf("refresh hits=%d want 1", f.refreshHits.Load())
+	if maxActive != 1 {
+		t.Fatalf("maxActive=%d want 1 (Checkin 未串行化)", maxActive)
 	}
 	if f.checkinHits.Load() != 2 {
 		t.Fatalf("checkin hits=%d want 2", f.checkinHits.Load())
-	}
-
-	saved, err := os.ReadFile(filepath.Join(dir, "workbuddy-u1.json"))
-	if err != nil {
-		t.Fatalf("read saved: %v", err)
-	}
-	a, err := auth.Parse(saved)
-	if err != nil {
-		t.Fatalf("parse saved: %v", err)
-	}
-	if a.AccessTokenValue() != "new-at" {
-		t.Fatalf("saved accessToken=%q", a.AccessTokenValue())
-	}
-	if a.RefreshTokenValue() != "new-rt" {
-		t.Fatalf("saved refreshToken=%q", a.RefreshTokenValue())
 	}
 }

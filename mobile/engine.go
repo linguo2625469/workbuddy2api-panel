@@ -31,6 +31,9 @@ type Engine struct {
 	mu  sync.Mutex
 	dir string
 	up  *upstream.Client
+
+	// testHook 仅供测试观察串行化；生产恒为 nil。
+	testHook func()
 }
 
 // NewEngine 创建引擎；dir 为 App 私有账号目录。
@@ -147,6 +150,10 @@ func marshal(v any) (string, error) {
 func (e *Engine) Checkin(uid string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.testHook != nil {
+		e.testHook()
+	}
 
 	a, err := e.load(uid)
 	if err != nil {
