@@ -81,7 +81,10 @@ class CheckinViewModel(
 
     fun importFiles(files: List<ImportFile>) {
         if (files.isEmpty()) return
-        if (!claimOperation()) return
+        if (!claimOperation()) {
+            _state.update { it.copy(error = "正在处理中，请稍后再导入") }
+            return
+        }
         viewModelScope.launch(io) {
             try {
                 _state.update { it.copy(error = null) }

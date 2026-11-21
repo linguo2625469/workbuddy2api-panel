@@ -60,7 +60,9 @@ fun AppScreen(
         topBar = {
             TopAppBar(
                 title = { Text("WB 签到") },
-                actions = { TextButton(onClick = onImport) { Text("导入") } },
+                actions = {
+                    TextButton(onClick = onImport, enabled = !state.busy) { Text("导入") }
+                },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
@@ -100,7 +102,7 @@ fun AppScreen(
                         .weight(1f)
                         .fillMaxWidth(),
                 ) {
-                    EmptyState(onImport)
+                    EmptyState(onImport, enabled = !state.busy)
                 }
 
                 else -> LazyColumn(
@@ -218,7 +220,7 @@ private fun statusColor(status: String): Color = when (status) {
 }
 
 @Composable
-private fun EmptyState(onImport: () -> Unit) {
+private fun EmptyState(onImport: () -> Unit, enabled: Boolean) {
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -232,7 +234,7 @@ private fun EmptyState(onImport: () -> Unit) {
             textAlign = TextAlign.Center,
         )
         Spacer(Modifier.height(16.dp))
-        Button(onClick = onImport) { Text("导入账号") }
+        Button(onClick = onImport, enabled = enabled) { Text("导入账号") }
     }
 }
 
