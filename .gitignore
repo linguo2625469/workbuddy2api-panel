@@ -1,6 +1,6 @@
-# Auth & secrets
+# Auth & secrets（data/ 锚定根目录，避免忽略 android 的 com/wb2api/checkin/data 源码包）
 auths/
-data/
+/data/
 *.key
 *.pem
 *.env
