@@ -55,7 +55,7 @@ type accountJSON struct {
 func (e *Engine) ImportAccount(content string) (string, error) {
 	a, err := auth.Parse([]byte(content))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("账号文件解析失败: %w", err)
 	}
 	a.UID = strings.TrimSpace(a.UID)
 	if a.UID == "" {
@@ -65,14 +65,14 @@ func (e *Engine) ImportAccount(content string) (string, error) {
 		return "", fmt.Errorf("uid 含非法字符，无法导入")
 	}
 	if err := os.MkdirAll(e.dir, 0o700); err != nil {
-		return "", err
+		return "", fmt.Errorf("创建账号目录失败: %w", err)
 	}
 	a.FilePath = filepath.Join(e.dir, "workbuddy-"+a.UID+".json")
 	if a.RealmStored() == "" {
 		a.BackfillRealm()
 	}
 	if err := a.SaveAtomic(); err != nil {
-		return "", err
+		return "", fmt.Errorf("账号文件写入失败: %w", err)
 	}
 	return marshal(accountOf(a))
 }
@@ -81,7 +81,7 @@ func (e *Engine) ImportAccount(content string) (string, error) {
 func (e *Engine) ListAccounts() (string, error) {
 	list, err := auth.LoadDir(e.dir)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("读取账号目录失败: %w", err)
 	}
 	out := make([]accountJSON, 0, len(list))
 	for _, a := range list {

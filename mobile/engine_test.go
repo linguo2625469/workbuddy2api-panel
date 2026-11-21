@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,11 +72,19 @@ func TestImportRejectsInvalid(t *testing.T) {
 		`not json`,
 		`{"auth":{"accessToken":""},"account":{"uid":"u1"}}`,
 		`{"accessToken":"at","refreshToken":"rt"}`,
+		`{"accessToken":"at","refreshToken":"rt","uid":"../x"}`,
+		`{"accessToken":"at","refreshToken":"rt","uid":"` + strings.Repeat("a", 65) + `"}`,
 	}
 	for _, c := range cases {
 		if _, err := e.ImportAccount(c); err == nil {
 			t.Fatalf("want error for %s", c)
 		}
+	}
+
+	if _, err := e.ImportAccount(`not json`); err == nil {
+		t.Fatalf("want parse error for malformed json")
+	} else if !strings.Contains(err.Error(), "账号文件解析失败") {
+		t.Fatalf("parse error missing Chinese context: %v", err)
 	}
 }
 
