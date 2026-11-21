@@ -5,6 +5,7 @@ import com.wb2api.checkin.data.CheckinResult
 import com.wb2api.checkin.data.EngineClient
 import com.wb2api.checkin.data.ImportFile
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -14,8 +15,10 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class CheckinViewModelTest {
+    private val dispatcher = StandardTestDispatcher()
+
     @get:Rule
-    val main = MainDispatcherRule()
+    val main = MainDispatcherRule(dispatcher)
 
     private class FakeEngine(
         var accounts: List<Account> = listOf(
@@ -75,6 +78,21 @@ class CheckinViewModelTest {
         assertEquals(listOf("u1", "u2"), engine.checked)
         assertEquals("failed", vm.state.value.rows[0].result?.status)
         assertEquals("ok", vm.state.value.rows[1].result?.status)
+    }
+
+    @Test
+    fun `rapid checkin all calls do not overlap`() {
+        val engine = FakeEngine()
+        val vm = CheckinViewModel(engine, io = dispatcher)
+        dispatcher.scheduler.advanceUntilIdle()
+
+        vm.checkinAll()
+        vm.checkinAll()
+        dispatcher.scheduler.advanceUntilIdle()
+
+        assertEquals(listOf("u1", "u2"), engine.checked)
+        assertEquals(2, vm.state.value.progressTotal)
+        assertTrue(!vm.state.value.busy)
     }
 
     @Test

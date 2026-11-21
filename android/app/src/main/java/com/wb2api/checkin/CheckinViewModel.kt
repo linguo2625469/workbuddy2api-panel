@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class AccountRow(
     val account: Account,
@@ -44,6 +45,19 @@ class CheckinViewModel(
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
+    private val opLock = AtomicBoolean(false)
+
+    private fun claimOperation(): Boolean {
+        if (!opLock.compareAndSet(false, true)) return false
+        _state.update { it.copy(busy = true) }
+        return true
+    }
+
+    private fun releaseOperation() {
+        _state.update { it.copy(busy = false) }
+        opLock.set(false)
+    }
+
     init {
         refresh()
     }
@@ -66,63 +80,72 @@ class CheckinViewModel(
     }
 
     fun importFiles(files: List<ImportFile>) {
-        if (files.isEmpty() || _state.value.busy) return
+        if (files.isEmpty()) return
+        if (!claimOperation()) return
         viewModelScope.launch(io) {
-            _state.update { it.copy(busy = true, error = null) }
-            var ok = 0
-            val failures = mutableListOf<String>()
-            for (file in files) {
-                val content = file.content
-                if (content == null) {
-                    failures += "${file.name}：无法读取文件"
-                    continue
+            try {
+                _state.update { it.copy(error = null) }
+                var ok = 0
+                val failures = mutableListOf<String>()
+                for (file in files) {
+                    val content = file.content
+                    if (content == null) {
+                        failures += "${file.name}：无法读取文件"
+                        continue
+                    }
+                    runCatching { engine.importAccount(content) }
+                        .onSuccess { ok++ }
+                        .onFailure { failures += "${file.name}：${it.message ?: "导入失败"}" }
                 }
-                runCatching { engine.importAccount(content) }
-                    .onSuccess { ok++ }
-                    .onFailure { failures += "${file.name}：${it.message ?: "导入失败"}" }
+                _state.update {
+                    it.copy(importSummary = ImportSummary(files.size, ok, failures))
+                }
+                runCatching { engine.listAccounts() }
+                    .onSuccess { accounts ->
+                        _state.update { s -> s.copy(rows = mergeRows(accounts, s.rows)) }
+                    }
+                    .onFailure { e ->
+                        _state.update { it.copy(error = "刷新账号失败：${e.message}") }
+                    }
+            } finally {
+                releaseOperation()
             }
-            _state.update {
-                it.copy(
-                    busy = false,
-                    importSummary = ImportSummary(files.size, ok, failures),
-                )
-            }
-            runCatching { engine.listAccounts() }
-                .onSuccess { accounts ->
-                    _state.update { s -> s.copy(rows = mergeRows(accounts, s.rows)) }
-                }
-                .onFailure { e ->
-                    _state.update { it.copy(error = "刷新账号失败：${e.message}") }
-                }
         }
     }
 
     fun checkin(uid: String) {
-        if (_state.value.busy) return
+        if (!claimOperation()) return
         viewModelScope.launch(io) {
-            _state.update { it.copy(busy = true) }
-            val result = runCheckin(uid)
-            _state.update { s ->
-                s.copy(busy = false, rows = s.rows.merge(result))
+            try {
+                val result = runCheckin(uid)
+                _state.update { s -> s.copy(rows = s.rows.merge(result)) }
+            } finally {
+                releaseOperation()
             }
         }
     }
 
     fun checkinAll() {
-        val snapshot = _state.value
-        if (snapshot.busy || snapshot.rows.isEmpty()) return
-        val targets = snapshot.rows.map { it.account.uid }
+        if (!claimOperation()) return
+        val targets = _state.value.rows.map { it.account.uid }
+        if (targets.isEmpty()) {
+            releaseOperation()
+            return
+        }
         viewModelScope.launch(io) {
-            _state.update {
-                it.copy(busy = true, progressDone = 0, progressTotal = targets.size)
-            }
-            targets.forEachIndexed { index, uid ->
-                val result = runCheckin(uid)
-                _state.update { s ->
-                    s.copy(rows = s.rows.merge(result), progressDone = index + 1)
+            try {
+                _state.update {
+                    it.copy(progressDone = 0, progressTotal = targets.size)
                 }
+                targets.forEachIndexed { index, uid ->
+                    val result = runCheckin(uid)
+                    _state.update { s ->
+                        s.copy(rows = s.rows.merge(result), progressDone = index + 1)
+                    }
+                }
+            } finally {
+                releaseOperation()
             }
-            _state.update { it.copy(busy = false) }
         }
     }
 
