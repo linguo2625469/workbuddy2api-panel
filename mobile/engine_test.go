@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -124,13 +125,14 @@ func TestImportOverwritesSameUID(t *testing.T) {
 }
 
 type fakeUpstream struct {
-	srv         *httptest.Server
-	checkinHits atomic.Int32
-	refreshHits atomic.Int32
-	checkinBody string
-	refreshCode int
-	refreshBody string
-	lastAuth    string
+	srv          *httptest.Server
+	checkinHits  atomic.Int32
+	refreshHits  atomic.Int32
+	checkinBody  string
+	refreshCode  int
+	refreshBody  string
+	refreshDelay time.Duration
+	lastAuth     string
 }
 
 func newFakeUpstream(t *testing.T) *fakeUpstream {
@@ -154,6 +156,7 @@ func newFakeUpstream(t *testing.T) *fakeUpstream {
 		if got := r.Header.Get("X-Refresh-Token"); got == "" {
 			t.Errorf("missing X-Refresh-Token")
 		}
+		time.Sleep(f.refreshDelay)
 		w.Header().Set("Content-Type", "application/json")
 		if f.refreshCode != http.StatusOK {
 			w.WriteHeader(f.refreshCode)
@@ -342,5 +345,51 @@ func TestCheckinAuthInvalidWithoutRefreshToken(t *testing.T) {
 	}
 	if f.refreshHits.Load() != 0 || f.checkinHits.Load() != 0 {
 		t.Fatalf("unexpected hits refresh=%d checkin=%d", f.refreshHits.Load(), f.checkinHits.Load())
+	}
+}
+
+func TestConcurrentCheckinSerialized(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.refreshDelay = 100 * time.Millisecond
+	f.refreshBody = `{"code":0,"msg":"ok","data":{"accessToken":"new-at","refreshToken":"new-rt","expiresIn":5184000,"domain":"codebuddy.cn"}}`
+	dir := t.TempDir()
+	e := f.engine(dir)
+	soon := time.Now().Add(time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "old-at", "old-rt", soon, "")); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			if _, err := e.Checkin("u1"); err != nil {
+				t.Errorf("checkin: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if f.refreshHits.Load() != 1 {
+		t.Fatalf("refresh hits=%d want 1", f.refreshHits.Load())
+	}
+	if f.checkinHits.Load() != 2 {
+		t.Fatalf("checkin hits=%d want 2", f.checkinHits.Load())
+	}
+
+	saved, err := os.ReadFile(filepath.Join(dir, "workbuddy-u1.json"))
+	if err != nil {
+		t.Fatalf("read saved: %v", err)
+	}
+	a, err := auth.Parse(saved)
+	if err != nil {
+		t.Fatalf("parse saved: %v", err)
+	}
+	if a.AccessTokenValue() != "new-at" {
+		t.Fatalf("saved accessToken=%q", a.AccessTokenValue())
+	}
+	if a.RefreshTokenValue() != "new-rt" {
+		t.Fatalf("saved refreshToken=%q", a.RefreshTokenValue())
 	}
 }

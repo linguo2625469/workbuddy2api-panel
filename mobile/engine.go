@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -24,8 +25,10 @@ const (
 	refreshWindow  = 2 * time.Hour
 )
 
-// Engine 持有账号目录与上游客户端；每个方法都可从任意线程调用。
+// Engine 持有账号目录与上游客户端；每个方法都可从任意线程调用，
+// 内部用互斥锁串行化操作，避免并发签到互相覆盖已轮换的 token。
 type Engine struct {
+	mu  sync.Mutex
 	dir string
 	up  *upstream.Client
 }
@@ -63,6 +66,9 @@ type checkinResult struct {
 
 // ImportAccount 解析并保存单个账号文件内容；同 UID 覆盖旧文件。
 func (e *Engine) ImportAccount(content string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	a, err := auth.Parse([]byte(content))
 	if err != nil {
 		return "", fmt.Errorf("账号文件解析失败: %w", err)
@@ -89,6 +95,9 @@ func (e *Engine) ImportAccount(content string) (string, error) {
 
 // ListAccounts 返回全部账号的 JSON 数组，按文件名排序。
 func (e *Engine) ListAccounts() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	list, err := auth.LoadDir(e.dir)
 	if err != nil {
 		return "", fmt.Errorf("读取账号目录失败: %w", err)
@@ -136,6 +145,9 @@ func marshal(v any) (string, error) {
 
 // Checkin 对单号执行签到：企业号 / 国际版号本地跳过，其余调 DailyCheckin。
 func (e *Engine) Checkin(uid string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	a, err := e.load(uid)
 	if err != nil {
 		return "", err
