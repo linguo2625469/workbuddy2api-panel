@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -177,7 +179,7 @@ private fun StatusChip(status: String?) {
         "skipped" -> "已跳过"
         "auth_invalid" -> "凭证失效"
         "failed" -> "失败"
-        else -> status
+        else -> "未知"
     }
     val color = when (status) {
         null -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -245,7 +247,7 @@ private fun ImportDialog(summary: ImportSummary, onDismiss: () -> Unit) {
         confirmButton = { TextButton(onClick = onDismiss) { Text("知道了") } },
         title = { Text("导入结果") },
         text = {
-            Column {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                 Text("成功 ${summary.ok} / 共 ${summary.total} 个文件")
                 if (summary.failures.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))

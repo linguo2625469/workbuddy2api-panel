@@ -176,7 +176,7 @@ func (e *Engine) Checkin(uid string) (string, error) {
 			if upstream.IsAlreadyCheckin(err) {
 				r.Status, r.Message = "already", "今天已签到"
 			} else {
-				r.Status, r.Message = "failed", short(err.Error())
+				r.Status, r.Message = "failed", checkinErrorMessage(err)
 			}
 		} else {
 			r.Status, r.Message = "ok", "签到成功"
@@ -223,12 +223,22 @@ func (e *Engine) load(uid string) (*auth.Auth, error) {
 	return nil, fmt.Errorf("account not found: %s", uid)
 }
 
-// short 把上游错误压成一行，按 rune 截断避免切坏中文。
+// short 把上游错误压成一行，按 rune 截断避免切坏中文；含省略号不超过 160 字符。
 func short(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
 	r := []rune(s)
 	if len(r) > 160 {
-		return string(r[:160]) + "…"
+		return string(r[:159]) + "…"
 	}
 	return s
+}
+
+// checkinErrorMessage 把签到错误压成用户可读文案：上游业务/HTTP 错误保留摘要，
+// 传输层（DNS/连接/超时）错误统一加「网络错误：」前缀。
+func checkinErrorMessage(err error) string {
+	var ue *upstream.Error
+	if errors.As(err, &ue) {
+		return short(err.Error())
+	}
+	return "网络错误：" + short(err.Error())
 }

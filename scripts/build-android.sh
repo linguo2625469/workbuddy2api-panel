@@ -32,6 +32,9 @@ command -v gomobile >/dev/null || {
     exit 1
 }
 
+# 刷新 gomobile 的绑定工具链；重复执行安全（幂等）。
+gomobile init
+
 mkdir -p android/app/libs
 # Go 侧是中文注释，Windows 默认 GBK 编码会让生成的 Java 源码编译失败。
 JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }-Dfile.encoding=UTF-8" \

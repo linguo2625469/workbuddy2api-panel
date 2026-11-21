@@ -2,6 +2,7 @@ package mobile
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -131,7 +132,34 @@ type fakeUpstream struct {
 	checkinBody string
 	refreshCode int
 	refreshBody string
-	lastAuth    string
+
+	authMu   sync.Mutex
+	lastAuth string
+	lastUID  string
+}
+
+func (f *fakeUpstream) setLastAuth(v string) {
+	f.authMu.Lock()
+	f.lastAuth = v
+	f.authMu.Unlock()
+}
+
+func (f *fakeUpstream) lastAuthValue() string {
+	f.authMu.Lock()
+	defer f.authMu.Unlock()
+	return f.lastAuth
+}
+
+func (f *fakeUpstream) setLastUID(v string) {
+	f.authMu.Lock()
+	f.lastUID = v
+	f.authMu.Unlock()
+}
+
+func (f *fakeUpstream) lastUIDValue() string {
+	f.authMu.Lock()
+	defer f.authMu.Unlock()
+	return f.lastUID
 }
 
 func newFakeUpstream(t *testing.T) *fakeUpstream {
@@ -143,7 +171,8 @@ func newFakeUpstream(t *testing.T) *fakeUpstream {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v2/billing/meter/daily-checkin", func(w http.ResponseWriter, r *http.Request) {
 		f.checkinHits.Add(1)
-		f.lastAuth = r.Header.Get("Authorization")
+		f.setLastAuth(r.Header.Get("Authorization"))
+		f.setLastUID(r.Header.Get("X-User-Id"))
 		if got := r.Header.Get("X-CodeBuddy-Request"); got != "1" {
 			t.Errorf("X-CodeBuddy-Request=%q want 1", got)
 		}
@@ -202,8 +231,11 @@ func TestCheckinSuccess(t *testing.T) {
 	if f.checkinHits.Load() != 1 || f.refreshHits.Load() != 0 {
 		t.Fatalf("hits checkin=%d refresh=%d", f.checkinHits.Load(), f.refreshHits.Load())
 	}
-	if f.lastAuth != "Bearer at-1" {
-		t.Fatalf("authorization=%q", f.lastAuth)
+	if f.lastAuthValue() != "Bearer at-1" {
+		t.Fatalf("authorization=%q", f.lastAuthValue())
+	}
+	if f.lastUIDValue() != "u1" {
+		t.Fatalf("X-User-Id=%q want u1", f.lastUIDValue())
 	}
 }
 
@@ -224,6 +256,56 @@ func TestCheckinAlready(t *testing.T) {
 	if r.Status != "already" || r.Message != "今天已签到" {
 		t.Fatalf("result=%+v", r)
 	}
+	if f.checkinHits.Load() != 1 {
+		t.Fatalf("checkin hits=%d want 1", f.checkinHits.Load())
+	}
+}
+
+func TestCheckinBusinessFailure(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.checkinBody = `{"code":1,"msg":"服务开小差了","data":{}}`
+	e := f.engine(t.TempDir())
+	future := time.Now().Add(24 * time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "at-1", "rt-1", future, "")); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	raw, err := e.Checkin("u1")
+	if err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	r := decodeResult(t, raw)
+	if r.Status != "failed" || !strings.Contains(r.Message, "服务开小差了") {
+		t.Fatalf("result=%+v", r)
+	}
+	if f.checkinHits.Load() != 1 {
+		t.Fatalf("checkin hits=%d want 1", f.checkinHits.Load())
+	}
+}
+
+func TestCheckinErrorMessage(t *testing.T) {
+	if got := checkinErrorMessage(fmt.Errorf("dial tcp: i/o timeout")); !strings.HasPrefix(got, "网络错误：") {
+		t.Fatalf("transport error=%q want 网络错误： prefix", got)
+	}
+	upErr := &upstream.Error{Kind: upstream.ErrServer, Status: 500, Msg: "boom"}
+	got := checkinErrorMessage(upErr)
+	if strings.HasPrefix(got, "网络错误：") {
+		t.Fatalf("upstream error=%q should not carry network prefix", got)
+	}
+	if !strings.Contains(got, "boom") {
+		t.Fatalf("upstream error=%q missing msg", got)
+	}
+}
+
+func TestShortLimit(t *testing.T) {
+	long := strings.Repeat("签", 200)
+	got := short(long)
+	if len([]rune(got)) != 160 {
+		t.Fatalf("short rune len=%d want 160", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("short=%q missing ellipsis", got)
+	}
 }
 
 func TestCheckinSkipsEnterpriseAndGlobal(t *testing.T) {
@@ -237,14 +319,18 @@ func TestCheckinSkipsEnterpriseAndGlobal(t *testing.T) {
 		t.Fatalf("import global: %v", err)
 	}
 
+	want := map[string]string{
+		"ent": "企业账号无签到体系（已跳过）",
+		"glb": "国际版账号无签到体系（已跳过）",
+	}
 	for _, uid := range []string{"ent", "glb"} {
 		raw, err := e.Checkin(uid)
 		if err != nil {
 			t.Fatalf("checkin %s: %v", uid, err)
 		}
 		r := decodeResult(t, raw)
-		if r.Status != "skipped" {
-			t.Fatalf("%s result=%+v", uid, r)
+		if r.Status != "skipped" || r.Message != want[uid] {
+			t.Fatalf("%s result=%+v want message %q", uid, r, want[uid])
 		}
 	}
 	if f.checkinHits.Load() != 0 || f.refreshHits.Load() != 0 {
@@ -281,8 +367,8 @@ func TestCheckinRefreshesExpiringToken(t *testing.T) {
 	if f.refreshHits.Load() != 1 {
 		t.Fatalf("refresh hits=%d want 1", f.refreshHits.Load())
 	}
-	if f.lastAuth != "Bearer new-at" {
-		t.Fatalf("checkin authorization=%q want Bearer new-at", f.lastAuth)
+	if f.lastAuthValue() != "Bearer new-at" {
+		t.Fatalf("checkin authorization=%q want Bearer new-at", f.lastAuthValue())
 	}
 
 	saved, err := os.ReadFile(filepath.Join(dir, "workbuddy-u1.json"))

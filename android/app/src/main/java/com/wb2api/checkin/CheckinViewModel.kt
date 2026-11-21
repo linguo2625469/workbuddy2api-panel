@@ -118,6 +118,8 @@ class CheckinViewModel(
 
     fun checkin(uid: String) {
         if (!claimOperation()) return
+        // 单号签到不产生进度，清空上一轮「全部签到」遗留的 N/N。
+        _state.update { it.copy(progressDone = 0, progressTotal = 0) }
         viewModelScope.launch(io) {
             try {
                 val result = runCheckin(uid)
