@@ -2,10 +2,17 @@ package mobile
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
 )
 
 // testAuthDoc 生成与插件 OAuth 输出同形的账号文件内容。
@@ -111,5 +118,141 @@ func TestImportOverwritesSameUID(t *testing.T) {
 	}
 	if doc.Auth.AccessToken != "at-new" {
 		t.Fatalf("accessToken=%q want at-new", doc.Auth.AccessToken)
+	}
+}
+
+type fakeUpstream struct {
+	srv         *httptest.Server
+	checkinHits atomic.Int32
+	refreshHits atomic.Int32
+	checkinBody string
+	refreshCode int
+	refreshBody string
+	lastAuth    string
+}
+
+func newFakeUpstream(t *testing.T) *fakeUpstream {
+	t.Helper()
+	f := &fakeUpstream{
+		checkinBody: `{"code":0,"msg":"ok","data":{}}`,
+		refreshCode: http.StatusOK,
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v2/billing/meter/daily-checkin", func(w http.ResponseWriter, r *http.Request) {
+		f.checkinHits.Add(1)
+		f.lastAuth = r.Header.Get("Authorization")
+		if got := r.Header.Get("X-CodeBuddy-Request"); got != "1" {
+			t.Errorf("X-CodeBuddy-Request=%q want 1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, f.checkinBody)
+	})
+	mux.HandleFunc("/v2/plugin/auth/token/refresh", func(w http.ResponseWriter, r *http.Request) {
+		f.refreshHits.Add(1)
+		if got := r.Header.Get("X-Refresh-Token"); got == "" {
+			t.Errorf("missing X-Refresh-Token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if f.refreshCode != http.StatusOK {
+			w.WriteHeader(f.refreshCode)
+		}
+		_, _ = io.WriteString(w, f.refreshBody)
+	})
+	f.srv = httptest.NewServer(mux)
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeUpstream) engine(dir string) *Engine {
+	up := upstream.New()
+	up.HTTP = f.srv.Client()
+	up.ChatBaseCN = f.srv.URL
+	up.BillingBaseCN = f.srv.URL
+	return newEngineWith(dir, up)
+}
+
+func decodeResult(t *testing.T, raw string) checkinResult {
+	t.Helper()
+	var r checkinResult
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	return r
+}
+
+func TestCheckinSuccess(t *testing.T) {
+	f := newFakeUpstream(t)
+	e := f.engine(t.TempDir())
+	future := time.Now().Add(24 * time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "at-1", "rt-1", future, "")); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	raw, err := e.Checkin("u1")
+	if err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	r := decodeResult(t, raw)
+	if r.Status != "ok" || r.Message != "签到成功" {
+		t.Fatalf("result=%+v", r)
+	}
+	if f.checkinHits.Load() != 1 || f.refreshHits.Load() != 0 {
+		t.Fatalf("hits checkin=%d refresh=%d", f.checkinHits.Load(), f.refreshHits.Load())
+	}
+	if f.lastAuth != "Bearer at-1" {
+		t.Fatalf("authorization=%q", f.lastAuth)
+	}
+}
+
+func TestCheckinAlready(t *testing.T) {
+	f := newFakeUpstream(t)
+	f.checkinBody = `{"code":10001,"msg":"今天已签到","data":{}}`
+	e := f.engine(t.TempDir())
+	future := time.Now().Add(24 * time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "u1", "一号", "cn", "at-1", "rt-1", future, "")); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+
+	raw, err := e.Checkin("u1")
+	if err != nil {
+		t.Fatalf("checkin: %v", err)
+	}
+	r := decodeResult(t, raw)
+	if r.Status != "already" || r.Message != "今天已签到" {
+		t.Fatalf("result=%+v", r)
+	}
+}
+
+func TestCheckinSkipsEnterpriseAndGlobal(t *testing.T) {
+	f := newFakeUpstream(t)
+	e := f.engine(t.TempDir())
+	future := time.Now().Add(24 * time.Hour).Unix()
+	if _, err := e.ImportAccount(testAuthDoc(t, "ent", "企业", "cn", "at-ent", "rt-ent", future, "ent-1")); err != nil {
+		t.Fatalf("import enterprise: %v", err)
+	}
+	if _, err := e.ImportAccount(testAuthDoc(t, "glb", "国际", "global", "at-glb", "rt-glb", future, "")); err != nil {
+		t.Fatalf("import global: %v", err)
+	}
+
+	for _, uid := range []string{"ent", "glb"} {
+		raw, err := e.Checkin(uid)
+		if err != nil {
+			t.Fatalf("checkin %s: %v", uid, err)
+		}
+		r := decodeResult(t, raw)
+		if r.Status != "skipped" {
+			t.Fatalf("%s result=%+v", uid, r)
+		}
+	}
+	if f.checkinHits.Load() != 0 || f.refreshHits.Load() != 0 {
+		t.Fatalf("unexpected upstream hits checkin=%d refresh=%d", f.checkinHits.Load(), f.refreshHits.Load())
+	}
+}
+
+func TestCheckinUnknownUID(t *testing.T) {
+	f := newFakeUpstream(t)
+	e := f.engine(t.TempDir())
+	if _, err := e.Checkin("missing"); err == nil {
+		t.Fatalf("want error for missing uid")
 	}
 }

@@ -51,6 +51,14 @@ type accountJSON struct {
 	File       string `json:"file"`
 }
 
+type checkinResult struct {
+	UID       string `json:"uid"`
+	Nickname  string `json:"nickname"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
+	CheckedAt string `json:"checked_at"`
+}
+
 // ImportAccount 解析并保存单个账号文件内容；同 UID 覆盖旧文件。
 func (e *Engine) ImportAccount(content string) (string, error) {
 	a, err := auth.Parse([]byte(content))
@@ -122,4 +130,57 @@ func marshal(v any) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+// Checkin 对单号执行签到：企业号 / 国际版号本地跳过，其余调 DailyCheckin。
+func (e *Engine) Checkin(uid string) (string, error) {
+	a, err := e.load(uid)
+	if err != nil {
+		return "", err
+	}
+	r := checkinResult{
+		UID:       a.UID,
+		Nickname:  a.Nickname,
+		CheckedAt: time.Now().Format(time.RFC3339),
+	}
+	switch {
+	case a.IsEnterprise():
+		r.Status, r.Message = "skipped", "企业账号无签到体系（已跳过）"
+	case a.IsGlobal():
+		r.Status, r.Message = "skipped", "国际版账号无签到体系（已跳过）"
+	default:
+		if err := e.up.DailyCheckin(a); err != nil {
+			if upstream.IsAlreadyCheckin(err) {
+				r.Status, r.Message = "already", "今天已签到"
+			} else {
+				r.Status, r.Message = "failed", short(err.Error())
+			}
+		} else {
+			r.Status, r.Message = "ok", "签到成功"
+		}
+	}
+	return marshal(r)
+}
+
+func (e *Engine) load(uid string) (*auth.Auth, error) {
+	list, err := auth.LoadDir(e.dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range list {
+		if a.UID == uid {
+			return a, nil
+		}
+	}
+	return nil, fmt.Errorf("account not found: %s", uid)
+}
+
+// short 把上游错误压成一行，按 rune 截断避免切坏中文。
+func short(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	r := []rune(s)
+	if len(r) > 160 {
+		return string(r[:160]) + "…"
+	}
+	return s
 }
