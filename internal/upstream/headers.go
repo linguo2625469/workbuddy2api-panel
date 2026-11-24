@@ -133,6 +133,17 @@ func deriveAccountStableID(uid, purpose string) string {
 	return hex.EncodeToString(sum[:18]) // 36 hex chars
 }
 
+// injectResinAccount sets X-Resin-Account when Resin is enabled without
+// adding device fingerprint headers (X-Machine-ID / X-Session-ID).
+func (c *Client) injectResinAccount(req *http.Request, a *auth.Auth) {
+	if !c.resinEnabled() || a == nil {
+		return
+	}
+	if uid := strings.TrimSpace(a.UID); uid != "" {
+		req.Header.Set(resinAccountHeader, uid)
+	}
+}
+
 // injectAccountStableHeaders 在 req 注入 X-Machine-ID / X-Session-ID：按 uid 稳定
 // 派生，跨重启固定、账号间互异。uid 为空时不注入（匿名请求无设备标识，上游不要求）。
 func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
@@ -141,11 +152,7 @@ func (c *Client) injectAccountStableHeaders(req *http.Request, a *auth.Auth) {
 	}
 	req.Header.Set("X-Machine-ID", deriveAccountStableID(a.UID, "machine"))
 	req.Header.Set("X-Session-ID", deriveAccountStableID(a.UID, "session"))
-	// Resin uses this stable business identity to bind exactly one egress lease
-	// per WorkBuddy account. It is consumed by the local Resin reverse proxy.
-	if c.resinEnabled() {
-		req.Header.Set("X-Resin-Account", a.UID)
-	}
+	c.injectResinAccount(req, a)
 }
 
 // CommonHeaders 设置所有 API 共享的请求头。
@@ -399,8 +406,9 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
-	// Billing requests do not use CommonHeaders, so add the Resin identity here.
-	c.injectAccountStableHeaders(req, a)
+	// Billing requests do not use CommonHeaders; only add X-Resin-Account so we
+	// do not alter billing device-header fingerprints.
+	c.injectResinAccount(req, a)
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
 		req.Header.Set("X-Tenant-Id", a.EnterpriseID)

@@ -38,6 +38,7 @@ func (c *Client) schoolJSON(a *auth.Auth, method, path string, body map[string]a
 	if a.UID != "" {
 		req.Header.Set("X-User-Id", a.UID)
 	}
+	c.injectResinAccount(req, a)
 	data, err := c.doJSON(req)
 	if err != nil {
 		return err
@@ -114,6 +115,7 @@ func (c *Client) ReportMPEvent(a *auth.Auth, events ...map[string]any) error {
 	req.Header.Set("X-Client-Version", "2.4.0")
 	req.Header.Set("X-Client-Platform", "mp-weixin")
 	req.Header.Set("X-Platform", "wechatmp")
+	c.injectResinAccount(req, a)
 	_, err = c.doJSON(req)
 	return err
 }

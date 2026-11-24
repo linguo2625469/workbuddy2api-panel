@@ -756,6 +756,9 @@ type Client struct {
 	// 缺省 false（反代安全边界）；handler 在 chat 路径按请求把 clientIP 传入 ChatStream。
 	PassthroughIP bool
 
+	// resinConfigured 记录 ConfigureResin 是否已成功启用（避免依赖 Transport 类型断言）。
+	resinConfigured bool
+
 	// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底来源：config upstream.device_token。
 	// 解析优先级：auth.Auth.DeviceToken > DeviceToken（config）> DeviceTokenFile（文件）。
 	DeviceToken string
@@ -1873,6 +1876,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	}
 	req.Header.Set("User-Agent", ua)
 	c.injectCodeBuddyRequest(req)
+	c.injectResinAccount(req, a)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err

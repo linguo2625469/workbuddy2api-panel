@@ -21,6 +21,9 @@ type resinRoundTripper struct {
 // ConfigureResin enables Resin reverse-proxy routing for requests that carry a
 // per-account identity. Empty URL leaves the existing transport untouched.
 func (c *Client) ConfigureResin(rawURL, platform string) error {
+	if c == nil || c.HTTP == nil {
+		return fmt.Errorf("upstream client is not initialized")
+	}
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return nil
@@ -37,6 +40,7 @@ func (c *Client) ConfigureResin(rawURL, platform string) error {
 		return fmt.Errorf("resin.platform must be a non-empty path segment")
 	}
 	wrap := func(rt http.RoundTripper) http.RoundTripper {
+		rt = unwrapResinRoundTripper(rt)
 		if rt == nil {
 			rt = http.DefaultTransport
 		}
@@ -46,22 +50,49 @@ func (c *Client) ConfigureResin(rawURL, platform string) error {
 	if c.ChatHTTP != nil {
 		c.ChatHTTP.Transport = wrap(c.ChatHTTP.Transport)
 	}
+	c.resinConfigured = true
 	return nil
 }
 
-func (c *Client) resinEnabled() bool {
-	if c == nil || c.HTTP == nil {
-		return false
+func unwrapResinRoundTripper(rt http.RoundTripper) http.RoundTripper {
+	for {
+		rrt, ok := rt.(*resinRoundTripper)
+		if !ok {
+			return rt
+		}
+		rt = rrt.next
 	}
-	_, ok := c.HTTP.Transport.(*resinRoundTripper)
-	return ok
+}
+
+func unwrapHTTPTransport(rt http.RoundTripper) *http.Transport {
+	rt = unwrapResinRoundTripper(rt)
+	tr, _ := rt.(*http.Transport)
+	return tr
+}
+
+func (c *Client) resinEnabled() bool {
+	return c != nil && c.resinConfigured
+}
+
+// CloseIdleConnections forwards idle pool cleanup through the Resin wrapper.
+func (r *resinRoundTripper) CloseIdleConnections() {
+	roundTripCloseIdle(r.next)
+}
+
+func requestHasAccountIdentity(req *http.Request) bool {
+	return req.Header.Get("Authorization") != "" ||
+		req.Header.Get("X-User-Id") != "" ||
+		req.Header.Get("X-Refresh-Token") != ""
 }
 
 func (r *resinRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Requests without an account identity are intentionally left alone. This
-	// preserves unauthenticated metadata fetches while every account operation
-	// is explicitly marked by the shared header builders.
+	// Unauthenticated metadata fetches (e.g. models.dev) have no account identity
+	// and go direct. Authenticated requests missing X-Resin-Account fail closed
+	// so misconfigured/unmarked account traffic never leaks the host IP.
 	if req.Header.Get(resinAccountHeader) == "" {
+		if requestHasAccountIdentity(req) {
+			return nil, fmt.Errorf("resin proxy: refusing direct egress for account request missing %s", resinAccountHeader)
+		}
 		return r.next.RoundTrip(req)
 	}
 	original := req.URL
