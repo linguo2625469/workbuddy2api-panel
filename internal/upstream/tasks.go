@@ -251,6 +251,7 @@ func (c *Client) ClaimReward(a *auth.Auth, taskCode string) (credit, energy int6
 	if d := a.DomainValue(); d != "" {
 		req.Header.Set("X-Domain", d)
 	}
+	c.injectResinAccount(req, a)
 
 	data, err := c.doJSON(req)
 	if err != nil {
